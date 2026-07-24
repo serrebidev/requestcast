@@ -1,0 +1,1834 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import threading
+import time
+import unicodedata
+import uuid
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+import requests
+from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from mutagen import File as MutagenFile
+from mutagen.aiff import AIFF
+from mutagen.flac import FLAC, Picture
+from mutagen.id3 import APIC, COMM, ID3, TALB, TDRC, TIT2, TPE1, TPOS, TRCK, TXXX
+from mutagen.mp4 import MP4, MP4Cover
+from mutagen.wave import WAVE
+from openpyxl import load_workbook
+from pypdf import PdfReader
+from werkzeug.middleware.proxy_fix import ProxyFix
+from ytmusicapi import YTMusic
+
+from . import config, tools
+
+
+HTTP_TIMEOUT = (10, 30)
+MAX_COLLECTION_TRACKS = 100
+MAX_IMPORT_ENTRIES = 10_000
+MAX_IMPORT_TRACKS = 25_000
+# Artist-only import lines take the artist's whole catalogue unless the uploader picks a cap.
+IMPORT_ARTIST_TRACK_CHOICES = {"all": 0, "100": 100, "50": 50, "25": 25, "10": 10}
+MAX_ARTIST_ALBUMS = 300
+IMPORT_EXTENSIONS = {".txt", ".xlsx", ".pdf"}
+AZURACAST_AUDIO_EXTENSIONS = {
+    ".aac", ".aif", ".aiff", ".flac", ".m4a", ".mp2", ".mp3", ".mp4",
+    ".oga", ".ogg", ".opus", ".wav", ".wma",
+}
+
+app = Flask(__name__)
+app.permanent_session_lifetime = timedelta(hours=12)
+app.config.update(
+    SESSION_COOKIE_NAME="requestcast_session",
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Strict",
+    MAX_CONTENT_LENGTH=16 * 1024 * 1024,
+)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+SETTINGS: dict[str, Any] = {}
+STATE_DIR = Path(".")
+DOWNLOAD_DIR = Path(".")
+MEDIA_DIR = Path(".")
+DB_PATH = Path("jobs.sqlite3")
+YTDLP = ""
+FFMPEG = ""
+FFPROBE = ""
+AZURACAST_ENABLED = False
+AZURACAST_API_BASE = ""
+AZURACAST_API_KEY = ""
+STATION_ID = config.DEFAULT_STATION_ID
+REQUEST_PLAYLIST_ID = ""
+UPLOAD_DIR = config.DEFAULT_UPLOAD_DIRECTORY
+SECRET_KEY = ""
+PASSWORD_SALT = b""
+PASSWORD_HASH = b""
+signer: URLSafeTimedSerializer | None = None
+
+
+def station_api(path: str) -> str:
+    return f"{AZURACAST_API_BASE}/station/{STATION_ID}{path}"
+
+
+def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
+    """Load settings into module state. Safe to call again after the setup page saves."""
+    global SETTINGS, STATE_DIR, DOWNLOAD_DIR, MEDIA_DIR, DB_PATH, YTDLP, FFMPEG, FFPROBE
+    global AZURACAST_ENABLED, AZURACAST_API_BASE, AZURACAST_API_KEY, STATION_ID
+    global REQUEST_PLAYLIST_ID, UPLOAD_DIR, SECRET_KEY, PASSWORD_SALT, PASSWORD_HASH, signer
+
+    SETTINGS = new_settings if new_settings is not None else config.load()
+    STATE_DIR = Path(SETTINGS["state_dir"])
+    DOWNLOAD_DIR = Path(SETTINGS["download_dir"])
+    DB_PATH = STATE_DIR / "jobs.sqlite3"
+    YTDLP = tools.find_tool("yt-dlp", SETTINGS.get("ytdlp_path", ""))
+    FFMPEG = tools.find_tool("ffmpeg", SETTINGS.get("ffmpeg_path", "")) or "ffmpeg"
+    FFPROBE = tools.find_tool("ffprobe", SETTINGS.get("ffprobe_path", "")) or "ffprobe"
+
+    AZURACAST_ENABLED = bool(SETTINGS.get("azuracast_enabled"))
+    AZURACAST_API_BASE = str(SETTINGS.get("azuracast_api_base", "")).rstrip("/")
+    AZURACAST_API_KEY = str(SETTINGS.get("azuracast_api_key", ""))
+    STATION_ID = str(SETTINGS.get("azuracast_station_id") or config.DEFAULT_STATION_ID)
+    REQUEST_PLAYLIST_ID = str(SETTINGS.get("azuracast_request_playlist_id", ""))
+    UPLOAD_DIR = str(SETTINGS.get("azuracast_upload_dir") or config.DEFAULT_UPLOAD_DIRECTORY)
+    # Without AzuraCast the downloads folder is the final destination for finished audio.
+    MEDIA_DIR = Path(SETTINGS["azuracast_media_dir"]) if (
+        AZURACAST_ENABLED and SETTINGS.get("azuracast_media_dir")
+    ) else DOWNLOAD_DIR
+
+    SECRET_KEY = str(SETTINGS.get("secret_key", ""))
+    PASSWORD_SALT = bytes.fromhex(SETTINGS["password_salt"]) if SETTINGS.get("password_salt") else b""
+    PASSWORD_HASH = bytes.fromhex(SETTINGS["password_hash"]) if SETTINGS.get("password_hash") else b""
+
+    app.secret_key = SECRET_KEY or "setup-mode-only"
+    # A cookie marked Secure never reaches a plain-HTTP localhost session.
+    app.config["SESSION_COOKIE_SECURE"] = SETTINGS.get("bind_host") not in {"127.0.0.1", "localhost", "::1"}
+    signer = URLSafeTimedSerializer(SECRET_KEY or "setup-mode-only", salt="requestcast-result-v1")
+
+    for directory in (STATE_DIR, DOWNLOAD_DIR):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    if config.is_configured(SETTINGS):
+        init_db()
+
+
+def password_required() -> bool:
+    return bool(PASSWORD_HASH)
+
+_rate_lock = threading.Lock()
+_rate_events: dict[tuple[str, str], list[float]] = {}
+
+
+def db_connect() -> sqlite3.Connection:
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def init_db() -> None:
+    with db_connect() as con:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                label TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                total INTEGER NOT NULL DEFAULT 0,
+                completed INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        con.execute(
+            "UPDATE jobs SET state='queued', detail='Resuming after service restart' WHERE state='running'"
+        )
+
+
+def rate_allowed(bucket: str, key: str, limit: int, window: int) -> bool:
+    now = time.monotonic()
+    cutoff = now - window
+    with _rate_lock:
+        slot = (bucket, key)
+        events = [stamp for stamp in _rate_events.get(slot, []) if stamp >= cutoff]
+        if len(events) >= limit:
+            _rate_events[slot] = events
+            return False
+        events.append(now)
+        _rate_events[slot] = events
+        return True
+
+
+def client_ip() -> str:
+    return request.remote_addr or "unknown"
+
+
+def hash_password(candidate: str, salt: bytes) -> bytes:
+    return hashlib.scrypt(
+        candidate.encode("utf-8"), salt=salt, n=2**15, r=8, p=1, dklen=32,
+        maxmem=64 * 1024 * 1024,
+    )
+
+
+def verify_password(candidate: str) -> bool:
+    if not PASSWORD_HASH:
+        return True
+    return hmac.compare_digest(hash_password(candidate, PASSWORD_SALT), PASSWORD_HASH)
+
+
+def csrf_token() -> str:
+    nonce = session.get("nonce", "")
+    return hmac.new(SECRET_KEY.encode(), nonce.encode(), hashlib.sha256).hexdigest()
+
+
+def require_csrf() -> None:
+    supplied = request.form.get("csrf", "")
+    if not supplied or not hmac.compare_digest(supplied, csrf_token()):
+        abort(400, "The form expired. Please go back and try again.")
+
+
+@app.before_request
+def require_login() -> Any:
+    if request.endpoint in {"healthz", "static"}:
+        return None
+    # Until setup is finished the only thing the program can usefully show is setup.
+    if not config.is_configured(SETTINGS):
+        if request.endpoint in {"setup", "setup_tools"}:
+            return None
+        return redirect(url_for("setup"))
+    if request.endpoint in {"setup", "setup_tools"} and not session.get("authenticated"):
+        return redirect(url_for("login"))
+    if request.endpoint == "login":
+        return None
+    if not password_required():
+        session["authenticated"] = True
+        session.setdefault("nonce", uuid.uuid4().hex)
+        return None
+    if not session.get("authenticated"):
+        return redirect(url_for("login", next=request.full_path.rstrip("?")))
+    return None
+
+
+@app.after_request
+def security_headers(response):
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; style-src 'self'; img-src 'self' data: https://i.ytimg.com "
+        "https://*.ytimg.com https://lh3.googleusercontent.com https://*.dzcdn.net; "
+        "frame-src https://www.youtube-nocookie.com; "
+        "media-src 'self' https://*.dzcdn.net; form-action 'self'; frame-ancestors 'none'; "
+        "base-uri 'none'; script-src 'none'"
+    )
+    # YouTube embeds require an HTTP Referer for API client identification.
+    # This sends only our origin cross-site, without exposing URL paths or queries.
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.endpoint != "static":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.context_processor
+def template_helpers() -> dict[str, Any]:
+    return {"csrf_token": csrf_token}
+
+
+@app.route("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        if not rate_allowed("login", client_ip(), 6, 300):
+            return render_template("login.html", error="Too many attempts. Try again in a few minutes."), 429
+        if verify_password(request.form.get("password", "")):
+            session.clear()
+            session["authenticated"] = True
+            session["nonce"] = uuid.uuid4().hex
+            session.permanent = True
+            destination = request.form.get("next", "")
+            if not destination.startswith("/") or destination.startswith("//"):
+                destination = url_for("index")
+            return redirect(destination)
+        return render_template("login.html", error="Incorrect password."), 401
+    return render_template("login.html", error=None, next=request.args.get("next", ""))
+
+
+@app.post("/logout")
+def logout():
+    require_csrf()
+    session.clear()
+    return redirect(url_for("login"))
+
+
+def api_json(url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    response = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(str(data["error"]))
+    return data
+
+
+def best_thumbnail(thumbnails: list[dict[str, Any]] | None) -> str:
+    if not thumbnails:
+        return ""
+    return str(thumbnails[-1].get("url", ""))
+
+
+def artists_text(value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return ", ".join(str(item.get("name", "")) for item in value if item.get("name"))
+    return ""
+
+
+def format_yt_result(raw: dict[str, Any]) -> dict[str, Any] | None:
+    kind = str(raw.get("resultType", ""))
+    if kind not in {"song", "video", "album", "playlist", "artist"}:
+        return None
+    video_id = str(raw.get("videoId") or "")
+    browse_id = str(raw.get("browseId") or "")
+    title = str(raw.get("title") or raw.get("artist") or "Untitled")
+    artist = artists_text(raw.get("artists")) or str(raw.get("artist") or raw.get("author") or "")
+    album = raw.get("album") or {}
+    album_name = album.get("name", "") if isinstance(album, dict) else str(album)
+    duration = raw.get("duration") or ""
+    detail_parts = [part for part in (artist, album_name, str(duration)) if part]
+    payload = {
+        "source": "youtube",
+        "kind": kind,
+        "id": video_id or browse_id,
+        "video_id": video_id,
+        "browse_id": browse_id,
+        "title": title,
+        "artist": artist,
+        "album": album_name,
+        "duration_seconds": int(raw.get("duration_seconds") or 0),
+        "cover": best_thumbnail(raw.get("thumbnails")),
+    }
+    return {
+        **payload,
+        "detail": " — ".join(detail_parts),
+        "preview_type": "youtube" if video_id else "",
+        "preview": video_id,
+        "token": signer.dumps(payload),
+    }
+
+
+def search_youtube(query: str, kind: str) -> list[dict[str, Any]]:
+    filters = {
+        "song": "songs",
+        "video": "videos",
+        "album": "albums",
+        "playlist": "playlists",
+        "artist": "artists",
+    }
+    raw_results = YTMusic().search(query, filter=filters.get(kind), limit=25)
+    results = []
+    for raw in raw_results:
+        item = format_yt_result(raw)
+        if item:
+            results.append(item)
+    return results
+
+
+def deezer_cover(raw: dict[str, Any]) -> str:
+    for key in ("cover_xl", "cover_big", "picture_xl", "picture_big", "picture_medium"):
+        if raw.get(key):
+            return str(raw[key])
+    album = raw.get("album") or {}
+    if isinstance(album, dict):
+        return str(album.get("cover_xl") or album.get("cover_big") or album.get("cover_medium") or "")
+    return ""
+
+
+def format_deezer_result(raw: dict[str, Any], kind: str) -> dict[str, Any]:
+    if kind == "song":
+        artist = str((raw.get("artist") or {}).get("name", ""))
+        album = str((raw.get("album") or {}).get("title", ""))
+        title = str(raw.get("title", "Untitled"))
+        detail = " — ".join(part for part in (artist, album, f"{int(raw.get('duration', 0)) // 60}:{int(raw.get('duration', 0)) % 60:02d}") if part)
+        payload = {
+            "source": "deezer", "kind": "song", "id": str(raw.get("id", "")),
+            "title": title, "artist": artist, "album": album,
+            "duration_seconds": int(raw.get("duration") or 0), "track_number": int(raw.get("track_position") or 0),
+            "disc_number": int(raw.get("disk_number") or 0), "isrc": str(raw.get("isrc") or ""),
+            "cover": deezer_cover(raw),
+        }
+        preview = str(raw.get("preview") or "")
+    elif kind == "artist":
+        title = str(raw.get("name", "Unknown artist")); detail = f"{int(raw.get('nb_album') or 0)} albums"
+        payload = {"source": "deezer", "kind": kind, "id": str(raw.get("id", "")), "title": title, "artist": title, "cover": deezer_cover(raw)}
+        preview = ""
+    else:
+        title = str(raw.get("title", "Untitled"))
+        artist = str((raw.get("artist") or raw.get("creator") or {}).get("name", ""))
+        count = int(raw.get("nb_tracks") or 0)
+        detail = " — ".join(part for part in (artist, f"{count} tracks" if count else "") if part)
+        payload = {"source": "deezer", "kind": kind, "id": str(raw.get("id", "")), "title": title, "artist": artist, "cover": deezer_cover(raw)}
+        preview = ""
+    return {
+        **payload, "detail": detail, "preview_type": "audio" if preview else "",
+        "preview": preview, "token": signer.dumps(payload),
+    }
+
+
+def search_deezer_type(query: str, kind: str) -> list[dict[str, Any]]:
+    endpoint_kind = "track" if kind == "song" else kind
+    data = api_json(f"https://api.deezer.com/search/{endpoint_kind}", {"q": query, "limit": 12, "output": "json"})
+    return [format_deezer_result(item, kind) for item in data.get("data", [])]
+
+
+def search_deezer(query: str, kind: str) -> list[dict[str, Any]]:
+    kinds = [kind] if kind != "all" else ["song", "album", "artist", "playlist"]
+    combined: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(search_deezer_type, query, one_kind): one_kind for one_kind in kinds}
+        for future in as_completed(futures):
+            combined.extend(future.result())
+    order = {"song": 0, "video": 1, "album": 2, "artist": 3, "playlist": 4}
+    combined.sort(key=lambda item: (order.get(item["kind"], 9), item["title"].casefold()))
+    return combined
+
+
+def format_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds or 0))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+
+def ytdlp_json(url: str, *, playlist_limit: int | None = None) -> dict[str, Any]:
+    command = [
+        YTDLP, "--ignore-config", "--no-plugin-dirs",
+        "--skip-download", "--no-warnings", "--socket-timeout", "30",
+        "--retries", "3",
+    ]
+    if playlist_limit is None:
+        command.append("--no-playlist")
+    else:
+        command.extend(["--flat-playlist", "--playlist-end", str(playlist_limit)])
+    command.extend(["--dump-single-json", url])
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+    if result.returncode != 0:
+        lines = (result.stderr or result.stdout).strip().splitlines()
+        raise RuntimeError(lines[-1] if lines else "Could not read that YouTube URL.")
+    try:
+        data = json.loads(result.stdout)
+    except ValueError as exc:
+        raise RuntimeError("YouTube returned invalid metadata for that URL.") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("YouTube returned no usable metadata for that URL.")
+    return data
+
+
+def ytdlp_thumbnail(raw: dict[str, Any]) -> str:
+    if raw.get("thumbnail"):
+        return str(raw["thumbnail"])
+    thumbnails = raw.get("thumbnails") or []
+    if isinstance(thumbnails, list):
+        for thumbnail in reversed(thumbnails):
+            if isinstance(thumbnail, dict) and thumbnail.get("url"):
+                return str(thumbnail["url"])
+    return ""
+
+
+def youtube_url_result(value: str) -> dict[str, Any]:
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    query = parse_qs(parsed.query)
+    video_id = ""
+    playlist_id = ""
+    if host == "youtu.be" and segments:
+        video_id = segments[0]
+    elif host in {"youtube.com", "m.youtube.com", "music.youtube.com", "youtube-nocookie.com"}:
+        if parsed.path == "/watch":
+            video_id = (query.get("v") or [""])[0]
+        elif len(segments) >= 2 and segments[0] in {"shorts", "embed", "live"}:
+            video_id = segments[1]
+        if not video_id:
+            playlist_id = (query.get("list") or [""])[0]
+    else:
+        raise RuntimeError("Enter a YouTube or Deezer URL.")
+    if video_id:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+            raise RuntimeError("That YouTube video URL is not valid.")
+        info = ytdlp_json(f"https://www.youtube.com/watch?v={video_id}")
+        resolved_id = str(info.get("id") or video_id)
+        title = clean_youtube_title(str(info.get("track") or info.get("title") or "Untitled"))
+        artist = clean_text(
+            str(info.get("artist") or info.get("creator") or info.get("uploader") or info.get("channel") or "")
+        ) or "Unknown Artist"
+        album = clean_text(str(info.get("album") or ""))
+        duration = int(info.get("duration") or 0)
+        payload = {
+            "source": "youtube", "kind": "video", "id": resolved_id,
+            "video_id": resolved_id, "title": title, "artist": artist,
+            "album": album, "duration_seconds": duration,
+            "cover": ytdlp_thumbnail(info),
+        }
+        detail = " — ".join(part for part in (artist, album, format_duration(duration)) if part)
+        return {
+            **payload, "detail": detail, "preview_type": "youtube",
+            "preview": resolved_id, "token": signer.dumps(payload),
+        }
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,100}", playlist_id):
+        raise RuntimeError("That YouTube URL does not contain a valid video or playlist ID.")
+    info = ytdlp_json(
+        f"https://www.youtube.com/playlist?list={playlist_id}", playlist_limit=1
+    )
+    artist = clean_text(str(info.get("uploader") or info.get("channel") or ""))
+    count = int(info.get("playlist_count") or 0)
+    entries = info.get("entries") or []
+    cover = ytdlp_thumbnail(info)
+    if not cover and entries and isinstance(entries[0], dict):
+        cover = ytdlp_thumbnail(entries[0])
+    payload = {
+        "source": "youtube", "kind": "playlist", "id": playlist_id,
+        "browse_id": playlist_id, "title": str(info.get("title") or "YouTube playlist"),
+        "artist": artist, "cover": cover, "url_playlist": True,
+    }
+    detail = " — ".join(part for part in (artist, f"{count} tracks" if count else "") if part)
+    return {
+        **payload, "detail": detail, "preview_type": "", "preview": "",
+        "token": signer.dumps(payload),
+    }
+
+
+def deezer_url_result(value: str) -> dict[str, Any]:
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if host != "deezer.com":
+        raise RuntimeError("Enter a direct deezer.com track, album, artist, or playlist URL.")
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    content_kind = ""
+    content_id = ""
+    for index, segment in enumerate(segments[:-1]):
+        if segment in {"track", "album", "artist", "playlist"} and segments[index + 1].isdigit():
+            content_kind = segment
+            content_id = segments[index + 1]
+            break
+    if not content_kind:
+        raise RuntimeError("That Deezer URL does not contain a track, album, artist, or playlist ID.")
+    raw = api_json(f"https://api.deezer.com/{content_kind}/{content_id}")
+    return format_deezer_result(raw, "song" if content_kind == "track" else content_kind)
+
+
+def looks_like_media_url(value: str) -> bool:
+    lowered = value.strip().lower()
+    return "://" in lowered or lowered.startswith(
+        ("youtube.com/", "www.youtube.com/", "m.youtube.com/", "music.youtube.com/", "youtu.be/", "deezer.com/", "www.deezer.com/")
+    )
+
+
+def resolve_media_url(value: str) -> dict[str, Any]:
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+        raise RuntimeError("Only normal HTTPS YouTube and Deezer URLs are supported.")
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if host in {"youtube.com", "m.youtube.com", "music.youtube.com", "youtube-nocookie.com", "youtu.be"}:
+        return youtube_url_result(value)
+    if host == "deezer.com":
+        return deezer_url_result(value)
+    raise RuntimeError("Only YouTube and Deezer URLs are supported.")
+
+
+def recent_jobs(limit: int = 12) -> list[sqlite3.Row]:
+    with db_connect() as con:
+        return con.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+
+
+@app.route("/")
+def index():
+    query = request.args.get("q", "").strip()
+    source = request.args.get("source", "both")
+    kind = request.args.get("kind", "all")
+    if source not in {"both", "youtube", "deezer"}:
+        source = "both"
+    if kind not in {"all", "song", "video", "album", "artist", "playlist"}:
+        kind = "all"
+    results: list[dict[str, Any]] = []
+    errors: list[str] = []
+    url_input = looks_like_media_url(query)
+    if query:
+        if len(query) > (2048 if url_input else 160):
+            errors.append("URLs must be 2,048 characters or fewer." if url_input else "Search terms must be 160 characters or fewer.")
+        elif not rate_allowed("search", client_ip(), 30, 300):
+            errors.append("Too many searches. Please wait a few minutes.")
+        elif url_input:
+            try:
+                results.append(resolve_media_url(query))
+            except Exception as exc:
+                errors.append(f"URL lookup failed: {exc}")
+        else:
+            tasks = []
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                if source in {"both", "youtube"}:
+                    tasks.append(("YouTube", pool.submit(search_youtube, query, kind)))
+                if source in {"both", "deezer"} and kind != "video":
+                    tasks.append(("Deezer", pool.submit(search_deezer, query, kind)))
+                for label, future in tasks:
+                    try:
+                        results.extend(future.result())
+                    except Exception as exc:
+                        errors.append(f"{label} search failed: {exc}")
+    return render_template(
+        "index.html", query=query, source=source, kind=kind, results=results,
+        errors=errors, jobs=recent_jobs(), url_input=url_input,
+    )
+
+
+@app.post("/download")
+def queue_download():
+    require_csrf()
+    if not rate_allowed("download", client_ip(), 20, 300):
+        abort(429, "Too many downloads were queued. Please wait a few minutes.")
+    try:
+        payload = signer.loads(request.form.get("token", ""), max_age=86400)
+    except (BadSignature, SignatureExpired):
+        abort(400, "This search result expired. Search again and retry.")
+    if payload.get("source") not in {"youtube", "deezer"}:
+        abort(400)
+    action = request.form.get("action", "add")
+    if action not in {"add", "add_request"}:
+        abort(400)
+    payload["_request_after_add"] = action == "add_request"
+    payload["_request_ip"] = client_ip()
+    job_id = uuid.uuid4().hex
+    now = int(time.time())
+    label = f"{payload.get('title', 'Untitled')} ({payload.get('source')})"
+    with db_connect() as con:
+        con.execute(
+            "INSERT INTO jobs (id,state,label,detail,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (job_id, "queued", label, "Waiting for the downloader", json.dumps(payload), now, now),
+        )
+    return redirect(url_for("job_status", job_id=job_id))
+
+
+@app.post("/import")
+def queue_file_import():
+    require_csrf()
+    if not rate_allowed("import", client_ip(), 5, 300):
+        abort(429, "Too many files were uploaded. Please wait a few minutes.")
+    uploaded = request.files.get("file")
+    filename = Path(str(uploaded.filename or "")).name if uploaded else ""
+    extension = Path(filename).suffix.lower()
+    if not uploaded or not filename:
+        flash("Choose a TXT, XLSX, or PDF file to upload.")
+        return redirect(url_for("index"))
+    if extension not in IMPORT_EXTENSIONS:
+        flash("That file type is not supported. Upload a TXT, XLSX, or PDF file.")
+        return redirect(url_for("index"))
+    try:
+        entries = parse_import_file(filename, uploaded.stream)
+    except Exception as exc:
+        flash(f"The file could not be indexed: {exc}")
+        return redirect(url_for("index"))
+    if not entries:
+        flash("No artist, title, or supported music URL entries were found in that file.")
+        return redirect(url_for("index"))
+    choice = request.form.get("artist_tracks", "all")
+    if choice not in IMPORT_ARTIST_TRACK_CHOICES:
+        choice = "all"
+    artist_limit = IMPORT_ARTIST_TRACK_CHOICES[choice]
+    payload = {
+        "source": "import", "kind": "file", "filename": filename,
+        "entries": entries, "artist_limit": artist_limit,
+        "_request_after_add": False, "_request_ip": client_ip(),
+    }
+    job_id = uuid.uuid4().hex
+    now = int(time.time())
+    per_artist = "every track" if not artist_limit else f"top {artist_limit} tracks"
+    label = f"{filename} ({len(entries)} indexed entries, {per_artist} per artist)"
+    with db_connect() as con:
+        con.execute(
+            "INSERT INTO jobs (id,state,label,detail,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+            (
+                job_id, "queued", label,
+                f"Indexed {len(entries)} unique entries; waiting for the importer",
+                json.dumps(payload), now, now,
+            ),
+        )
+    return redirect(url_for("job_status", job_id=job_id))
+
+
+@app.route("/jobs/<job_id>")
+def job_status(job_id: str):
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        abort(404)
+    with db_connect() as con:
+        job = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not job:
+        abort(404)
+    return render_template("job.html", job=job)
+
+
+def update_job(job_id: str, **fields: Any) -> None:
+    if not fields:
+        return
+    fields["updated_at"] = int(time.time())
+    assignments = ",".join(f"{key}=?" for key in fields)
+    values = list(fields.values()) + [job_id]
+    with db_connect() as con:
+        con.execute(f"UPDATE jobs SET {assignments} WHERE id=?", values)
+
+
+def claim_job() -> sqlite3.Row | None:
+    with db_connect() as con:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created_at LIMIT 1").fetchone()
+        if not row:
+            con.commit()
+            return None
+        con.execute(
+            "UPDATE jobs SET state='running', detail='Preparing download', updated_at=? WHERE id=?",
+            (int(time.time()), row["id"]),
+        )
+        con.commit()
+        return row
+
+
+def clean_text(value: str) -> str:
+    return " ".join(str(value or "").replace("\x00", "").split())
+
+
+def clean_import_value(value: Any) -> str:
+    text = clean_text(str(value or "")).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    return text
+
+
+def import_entry_key(entry: dict[str, str]) -> str:
+    if entry.get("url"):
+        return f"url:{entry['url'].rstrip('/').casefold()}"
+    if entry.get("title"):
+        return f"track:{entry.get('artist', '').casefold()}|{entry['title'].casefold()}"
+    return f"query:{entry.get('query', '').casefold()}"
+
+
+def dedupe_import_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    unique: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        key = import_entry_key(entry)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(entry)
+        if len(unique) > MAX_IMPORT_ENTRIES:
+            raise RuntimeError(f"Files may contain at most {MAX_IMPORT_ENTRIES:,} unique entries.")
+    return unique
+
+
+def import_entry_from_values(first: Any, second: Any = None) -> dict[str, str] | None:
+    left = clean_import_value(first)
+    right = clean_import_value(second)
+    if not left and not right:
+        return None
+    if left.casefold() in {"artist", "performer", "band"} and right.casefold() in {
+        "title", "song", "track", "track title",
+    }:
+        return None
+    if left.lower().startswith(("http://", "https://")):
+        return {"url": left}
+    if left and right:
+        return {"artist": left, "title": right}
+    value = left or right
+    if " - " in value:
+        artist, title = (clean_import_value(part) for part in value.split(" - ", 1))
+        if artist and title:
+            return {"artist": artist, "title": title}
+    return {"query": value}
+
+
+def parse_txt_import(stream: Any) -> list[dict[str, str]]:
+    raw = stream.read()
+    if not isinstance(raw, bytes):
+        raw = str(raw).encode("utf-8")
+    if len(raw) > 16 * 1024 * 1024:
+        raise RuntimeError("The text file is too large.")
+    text = None
+    for encoding in ("utf-8-sig", "utf-16", "cp1252"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise RuntimeError("The text encoding could not be read.")
+    entries = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        values = line.split("\t", 1)
+        entry = import_entry_from_values(values[0], values[1] if len(values) > 1 else None)
+        if entry:
+            entries.append(entry)
+    return dedupe_import_entries(entries)
+
+
+def validate_xlsx_archive(stream: Any) -> None:
+    stream.seek(0)
+    try:
+        with zipfile.ZipFile(stream) as archive:
+            expanded_size = sum(member.file_size for member in archive.infolist())
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("The XLSX file is damaged or is not a real Excel workbook.") from exc
+    finally:
+        stream.seek(0)
+    if expanded_size > 128 * 1024 * 1024:
+        raise RuntimeError("The expanded XLSX workbook is too large.")
+
+
+def parse_xlsx_import(stream: Any) -> list[dict[str, str]]:
+    validate_xlsx_archive(stream)
+    workbook = load_workbook(stream, read_only=True, data_only=True)
+    entries: list[dict[str, str]] = []
+    try:
+        for sheet in workbook.worksheets:
+            for row in sheet.iter_rows(values_only=True):
+                first = row[0] if row else None
+                second = row[1] if len(row) > 1 else None
+                entry = import_entry_from_values(first, second)
+                if entry:
+                    entries.append(entry)
+                if len(entries) > MAX_IMPORT_ENTRIES * 2:
+                    raise RuntimeError(f"Files may contain at most {MAX_IMPORT_ENTRIES:,} entries.")
+    finally:
+        workbook.close()
+    return dedupe_import_entries(entries)
+
+
+def parse_pdf_import(stream: Any) -> list[dict[str, str]]:
+    stream.seek(0)
+    reader = PdfReader(stream)
+    if len(reader.pages) > 500:
+        raise RuntimeError("PDF files may contain at most 500 pages.")
+    entries: list[dict[str, str]] = []
+    for page in reader.pages:
+        text = page.extract_text(extraction_mode="layout") or ""
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            columns = re.split(r"\s{2,}", line, maxsplit=2)
+            entry = import_entry_from_values(columns[0], columns[1] if len(columns) > 1 else None)
+            if entry:
+                entries.append(entry)
+            if len(entries) > MAX_IMPORT_ENTRIES * 2:
+                raise RuntimeError(f"Files may contain at most {MAX_IMPORT_ENTRIES:,} entries.")
+    return dedupe_import_entries(entries)
+
+
+def parse_import_file(filename: str, stream: Any) -> list[dict[str, str]]:
+    extension = Path(filename).suffix.lower()
+    parsers = {".txt": parse_txt_import, ".xlsx": parse_xlsx_import, ".pdf": parse_pdf_import}
+    parser = parsers.get(extension)
+    if not parser:
+        raise RuntimeError("Only TXT, XLSX, and PDF files are supported.")
+    return parser(stream)
+
+
+def safe_filename(value: str, fallback: str = "Unknown") -> str:
+    value = unicodedata.normalize("NFKC", clean_text(value))
+    value = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "-", value).strip(" .-")
+    value = re.sub(r"\s+", " ", value)
+    return (value[:120].rstrip(" .-") or fallback)
+
+
+def parse_duration(value: str) -> int:
+    parts = [int(part) for part in value.split(":") if part.isdigit()]
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + part
+    return seconds
+
+
+def clean_youtube_title(title: str) -> str:
+    title = clean_text(title)
+    title = re.sub(
+        r"\s*[\[(](official\s+)?(music\s+)?(video|audio|lyric(s)?|visuali[sz]er|hd|hq|4k)[^\])]*[\])]\s*$",
+        "", title, flags=re.IGNORECASE,
+    )
+    return title.strip(" -–—|")
+
+
+def metadata_from_yt_track(raw: dict[str, Any]) -> dict[str, Any]:
+    title = clean_youtube_title(str(raw.get("title") or "Untitled"))
+    artist = artists_text(raw.get("artists")) or str(raw.get("author") or "")
+    if not artist and " - " in title:
+        artist, title = [part.strip() for part in title.split(" - ", 1)]
+    album = raw.get("album") or {}
+    return {
+        "source": "youtube", "source_id": str(raw.get("videoId") or ""),
+        "video_id": str(raw.get("videoId") or ""), "title": title,
+        "artist": clean_text(artist) or "Unknown Artist",
+        "album": clean_text(album.get("name", "") if isinstance(album, dict) else str(album)),
+        "duration_seconds": int(raw.get("duration_seconds") or parse_duration(str(raw.get("duration") or ""))),
+        "track_number": int(raw.get("trackNumber") or 0), "disc_number": 0,
+        "year": str(raw.get("year") or ""), "isrc": "", "cover": best_thumbnail(raw.get("thumbnails")),
+    }
+
+
+def youtube_search_score(candidate: dict[str, Any], wanted: dict[str, Any]) -> float:
+    def tokens(value: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]+", unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode().lower()))
+    desired = tokens(f"{wanted.get('artist', '')} {wanted.get('title', '')}")
+    actual = tokens(f"{artists_text(candidate.get('artists'))} {candidate.get('title', '')}")
+    overlap = len(desired & actual) / max(1, len(desired))
+    wanted_duration = int(wanted.get("duration_seconds") or 0)
+    candidate_duration = int(candidate.get("duration_seconds") or parse_duration(str(candidate.get("duration") or "")))
+    duration_score = 0.0
+    if wanted_duration and candidate_duration:
+        delta = abs(wanted_duration - candidate_duration)
+        duration_score = max(-1.0, 1.0 - delta / 20.0)
+    return overlap * 5 + duration_score
+
+
+def resolve_deezer_track(item: dict[str, Any], ytm: YTMusic | None = None) -> dict[str, Any]:
+    if not item.get("duration_seconds") or not item.get("isrc"):
+        raw = api_json(f"https://api.deezer.com/track/{item['id']}")
+        item = {
+            **item,
+            "title": str(raw.get("title") or item.get("title") or "Untitled"),
+            "artist": str((raw.get("artist") or {}).get("name") or item.get("artist") or "Unknown Artist"),
+            "album": str((raw.get("album") or {}).get("title") or item.get("album") or ""),
+            "duration_seconds": int(raw.get("duration") or item.get("duration_seconds") or 0),
+            "track_number": int(raw.get("track_position") or item.get("track_number") or 0),
+            "disc_number": int(raw.get("disk_number") or item.get("disc_number") or 0),
+            "isrc": str(raw.get("isrc") or item.get("isrc") or ""),
+            "cover": deezer_cover(raw) or item.get("cover", ""),
+            "year": str(raw.get("release_date") or "")[:4],
+        }
+    query = f"{item.get('artist', '')} {item.get('title', '')}"
+    searcher = ytm or YTMusic()
+    candidates = searcher.search(query, filter="songs", limit=8)
+    candidates = [candidate for candidate in candidates if candidate.get("videoId")]
+    if not candidates:
+        candidates = searcher.search(query, filter="videos", limit=8)
+    if not candidates:
+        raise RuntimeError("No matching YouTube audio source was found for this Deezer track.")
+    best = max(candidates, key=lambda candidate: youtube_search_score(candidate, item))
+    return {
+        **item, "source": "deezer", "source_id": str(item["id"]),
+        "video_id": str(best["videoId"]), "artist": clean_text(item.get("artist", "")) or "Unknown Artist",
+        "title": clean_text(item.get("title", "")) or "Untitled",
+    }
+
+
+def expand_youtube(item: dict[str, Any]) -> list[dict[str, Any]]:
+    ytm = YTMusic()
+    kind = item["kind"]
+    if kind in {"song", "video"}:
+        return [{
+            **item, "source_id": item.get("video_id") or item.get("id"),
+            "video_id": item.get("video_id") or item.get("id"),
+            "artist": item.get("artist") or "Unknown Artist", "title": clean_youtube_title(item.get("title", "Untitled")),
+        }]
+    if kind == "album":
+        raw_tracks = ytm.get_album(item["browse_id"])["tracks"]
+    elif kind == "playlist":
+        if item.get("url_playlist"):
+            playlist_id = str(item["browse_id"])
+            raw = ytdlp_json(
+                f"https://www.youtube.com/playlist?list={playlist_id}",
+                playlist_limit=MAX_COLLECTION_TRACKS,
+            )
+            tracks = []
+            for entry in raw.get("entries") or []:
+                if not isinstance(entry, dict):
+                    continue
+                video_id = str(entry.get("id") or "")
+                if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+                    continue
+                title = clean_youtube_title(str(entry.get("track") or entry.get("title") or "Untitled"))
+                artist = clean_text(str(entry.get("artist") or entry.get("uploader") or entry.get("channel") or item.get("artist") or "")) or "Unknown Artist"
+                tracks.append({
+                    "source": "youtube", "source_id": video_id, "video_id": video_id,
+                    "title": title, "artist": artist, "album": clean_text(str(entry.get("album") or "")),
+                    "duration_seconds": int(entry.get("duration") or 0), "track_number": 0,
+                    "disc_number": 0, "year": "", "isrc": "",
+                    "cover": ytdlp_thumbnail(entry),
+                })
+            return tracks
+        playlist_id = item["browse_id"]
+        if playlist_id.startswith("VL"):
+            playlist_id = playlist_id[2:]
+        raw_tracks = ytm.get_playlist(playlist_id, limit=MAX_COLLECTION_TRACKS).get("tracks", [])
+    elif kind == "artist":
+        artist_data = ytm.get_artist(item["browse_id"])
+        raw_tracks = (artist_data.get("songs") or {}).get("results", [])
+    else:
+        raise RuntimeError("Unsupported YouTube result type.")
+    tracks = [metadata_from_yt_track(raw) for raw in raw_tracks if raw.get("videoId")]
+    return tracks[:MAX_COLLECTION_TRACKS]
+
+
+def is_youtube_collection_url(value: str) -> bool:
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+        return False
+    if host not in {"youtube.com", "m.youtube.com", "music.youtube.com"}:
+        return False
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    return bool(segments and (segments[0].startswith("@") or segments[0] in {"channel", "c", "user"}))
+
+
+def expand_youtube_collection_url(value: str) -> list[dict[str, Any]]:
+    raw = ytdlp_json(value, playlist_limit=MAX_COLLECTION_TRACKS)
+    fallback_artist = clean_text(str(raw.get("uploader") or raw.get("channel") or "")) or "Unknown Artist"
+    tracks = []
+    for entry in raw.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        video_id = str(entry.get("id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+            continue
+        title = clean_youtube_title(str(entry.get("track") or entry.get("title") or "Untitled"))
+        artist = clean_text(
+            str(entry.get("artist") or entry.get("uploader") or entry.get("channel") or fallback_artist)
+        ) or fallback_artist
+        tracks.append({
+            "source": "youtube", "source_id": video_id, "video_id": video_id,
+            "title": title, "artist": artist,
+            "album": clean_text(str(entry.get("album") or "")),
+            "duration_seconds": int(entry.get("duration") or 0), "track_number": 0,
+            "disc_number": 0, "year": "", "isrc": "", "cover": ytdlp_thumbnail(entry),
+        })
+    return tracks
+
+
+def match_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode().lower()
+    text = re.sub(r"[(\[][^)\]]*[)\]]", " ", text)
+    text = re.sub(r"\b(feat|ft|featuring|with|and)\b.*$", " ", text)
+    return " ".join(re.findall(r"[a-z0-9]+", text))
+
+
+def deezer_song_item(raw: dict[str, Any]) -> dict[str, Any]:
+    formatted = format_deezer_result(raw, "song")
+    return {
+        key: value for key, value in formatted.items()
+        if key not in {"token", "detail", "preview", "preview_type"}
+    }
+
+
+def find_deezer_song(artist: str, title: str) -> dict[str, Any] | None:
+    """Return the Deezer track that cleanly matches this artist/title, if one exists."""
+    wanted_title = match_key(title)
+    wanted_artist = match_key(artist)
+    if not wanted_title:
+        return None
+    queries = []
+    if artist:
+        queries.append(f'artist:"{artist}" track:"{title}"')
+    queries.append(clean_text(f"{artist} {title}"))
+    for query in queries:
+        try:
+            data = api_json("https://api.deezer.com/search", {"q": query, "limit": 10, "output": "json"})
+        except Exception:
+            continue
+        for raw in data.get("data") or []:
+            if not raw.get("id"):
+                continue
+            titles = {match_key(raw.get("title")), match_key(raw.get("title_short"))}
+            if wanted_title not in titles:
+                continue
+            candidate_artist = match_key((raw.get("artist") or {}).get("name"))
+            if wanted_artist and not (
+                wanted_artist == candidate_artist
+                or wanted_artist in candidate_artist
+                or candidate_artist in wanted_artist
+            ):
+                continue
+            return raw
+    return None
+
+
+def resolve_import_via_deezer(artist: str, title: str, ytm: YTMusic) -> dict[str, Any] | None:
+    try:
+        raw = find_deezer_song(artist, title)
+        if not raw:
+            return None
+        return resolve_deezer_track(deezer_song_item(raw), ytm)
+    except Exception:
+        return None
+
+
+def deezer_paginate(url: str, params: dict[str, Any] | None, ceiling: int) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    while url and len(output) < ceiling:
+        data = api_json(url, params)
+        params = None
+        output.extend(data.get("data") or [])
+        url = str(data.get("next") or "")
+    return output[:ceiling]
+
+
+def deezer_artist_catalog(artist_id: str, wanted: str, ceiling: int) -> list[dict[str, Any]]:
+    """Every distinct track Deezer lists for this artist, across their whole discography."""
+    albums = deezer_paginate(
+        f"https://api.deezer.com/artist/{artist_id}/albums",
+        {"limit": 100, "output": "json"},
+        MAX_ARTIST_ALBUMS,
+    )
+    raw_tracks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for album in albums:
+        if not album.get("id"):
+            continue
+        try:
+            album_tracks = deezer_paginate(
+                f"https://api.deezer.com/album/{album['id']}/tracks",
+                {"limit": 100, "output": "json"},
+                ceiling,
+            )
+        except Exception:
+            continue
+        for raw in album_tracks:
+            if not raw.get("id"):
+                continue
+            # Compilations and "various artists" albums carry other performers; skip those.
+            performer = match_key((raw.get("artist") or {}).get("name"))
+            if wanted and performer and wanted not in performer and performer not in wanted:
+                continue
+            key = match_key(raw.get("title_short") or raw.get("title"))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            raw_tracks.append(raw)
+            if len(raw_tracks) >= ceiling:
+                return raw_tracks
+    return raw_tracks
+
+
+def find_deezer_artist(query: str) -> dict[str, Any] | None:
+    wanted = match_key(query)
+    if not wanted:
+        return None
+    try:
+        data = api_json("https://api.deezer.com/search/artist", {"q": query, "limit": 10, "output": "json"})
+    except Exception:
+        return None
+    matches = [raw for raw in data.get("data") or [] if raw.get("id") and match_key(raw.get("name")) == wanted]
+    if not matches:
+        return None
+    # Deezer returns unranked namesakes first, so pick the artist people actually listen to.
+    return max(matches, key=lambda raw: int(raw.get("nb_fan") or 0))
+
+
+def resolve_import_artist_via_deezer(query: str, ytm: YTMusic, limit: int = 0) -> list[dict[str, Any]]:
+    """Resolve an artist-only entry from Deezer: the full catalogue, or the top `limit` tracks."""
+    best = find_deezer_artist(query)
+    if not best:
+        return []
+    ceiling = limit or MAX_IMPORT_TRACKS
+    try:
+        if limit:
+            top = api_json(
+                f"https://api.deezer.com/artist/{best['id']}/top",
+                {"limit": limit, "output": "json"},
+            )
+            raw_tracks = [raw for raw in top.get("data") or [] if raw.get("id")][:limit]
+        else:
+            raw_tracks = deezer_artist_catalog(str(best["id"]), match_key(best.get("name")), ceiling)
+    except Exception:
+        return []
+    tracks = []
+    for raw in raw_tracks:
+        try:
+            tracks.append(resolve_deezer_track(deezer_song_item(raw), ytm))
+        except Exception:
+            continue
+    return tracks
+
+
+def youtube_artist_tracks(query: str, ytm: YTMusic, limit: int = 0) -> list[dict[str, Any]]:
+    artists = [candidate for candidate in ytm.search(query, filter="artists", limit=5) if candidate.get("browseId")]
+    if not artists:
+        return []
+    exact = [
+        candidate for candidate in artists
+        if clean_text(candidate.get("artist") or candidate.get("title") or "").casefold() == query.casefold()
+    ]
+    artist_data = ytm.get_artist(str((exact or artists)[0]["browseId"]))
+    songs = artist_data.get("songs") or {}
+    raw_tracks = list(songs.get("results") or [])
+    # The artist page only shows a handful of songs; the linked playlist has the rest.
+    if not limit and songs.get("browseId"):
+        try:
+            playlist_id = str(songs["browseId"]).removeprefix("VL")
+            raw_tracks = ytm.get_playlist(playlist_id, limit=None).get("tracks") or raw_tracks
+        except Exception:
+            pass
+    tracks = [metadata_from_yt_track(raw) for raw in raw_tracks if raw.get("videoId")]
+    return tracks[:limit] if limit else tracks[:MAX_IMPORT_TRACKS]
+
+
+def resolve_import_entry(entry: dict[str, str], ytm: YTMusic, artist_limit: int = 0) -> list[dict[str, Any]]:
+    if entry.get("url"):
+        value = entry["url"]
+        if is_youtube_collection_url(value):
+            return expand_youtube_collection_url(value)
+        item = resolve_media_url(value)
+        return expand_youtube(item) if item["source"] == "youtube" else expand_deezer(item)
+    if entry.get("title"):
+        wanted = {"artist": entry.get("artist", ""), "title": entry["title"]}
+        deezer_track = resolve_import_via_deezer(wanted["artist"], wanted["title"], ytm)
+        if deezer_track:
+            return [deezer_track]
+        query = clean_text(f"{wanted['artist']} {wanted['title']}")
+        candidates = [candidate for candidate in ytm.search(query, filter="songs", limit=8) if candidate.get("videoId")]
+        if not candidates:
+            candidates = [candidate for candidate in ytm.search(query, filter="videos", limit=8) if candidate.get("videoId")]
+        if not candidates:
+            raise RuntimeError("No matching YouTube song was found.")
+        track = metadata_from_yt_track(max(candidates, key=lambda candidate: youtube_search_score(candidate, wanted)))
+        track["artist"] = clean_import_value(wanted["artist"]) or track["artist"]
+        track["title"] = clean_import_value(wanted["title"]) or track["title"]
+        return [track]
+    query = clean_import_value(entry.get("query", ""))
+    deezer_catalog = resolve_import_artist_via_deezer(query, ytm, artist_limit)
+    if deezer_catalog:
+        return deezer_catalog
+    youtube_catalog = youtube_artist_tracks(query, ytm, artist_limit)
+    if youtube_catalog:
+        return youtube_catalog
+    candidates = [candidate for candidate in ytm.search(query, filter="songs", limit=8) if candidate.get("videoId")]
+    if not candidates:
+        raise RuntimeError("No matching artist or song was found.")
+    return [metadata_from_yt_track(candidates[0])]
+
+
+def track_identity(track: dict[str, Any]) -> str:
+    artist = clean_text(track.get("artist", "")).casefold()
+    title = clean_text(track.get("title", "")).casefold()
+    return f"{artist}|{title}" if artist or title else str(track.get("video_id") or track.get("source_id") or "")
+
+
+def expand_import(payload: dict[str, Any], job_id: str) -> tuple[list[dict[str, Any]], list[str]]:
+    entries = payload.get("entries") or []
+    ytm = YTMusic()
+    tracks: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for number, entry in enumerate(entries, 1):
+        label = entry.get("url") or clean_text(f"{entry.get('artist', '')} {entry.get('title') or entry.get('query', '')}")
+        update_job(job_id, detail=f"Resolving indexed entry {number} of {len(entries)}: {label[:160]}")
+        try:
+            resolved = resolve_import_entry(entry, ytm, int(payload.get("artist_limit") or 0))
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+        for track in resolved:
+            identity = track_identity(track)
+            if identity and identity not in seen:
+                seen.add(identity)
+                tracks.append(track)
+                if len(tracks) >= MAX_IMPORT_TRACKS:
+                    errors.append(f"The import was limited to {MAX_IMPORT_TRACKS:,} unique tracks.")
+                    return tracks, errors
+    return tracks, errors
+
+
+def deezer_tracks(endpoint: str) -> list[dict[str, Any]]:
+    url = f"https://api.deezer.com/{endpoint}"
+    output: list[dict[str, Any]] = []
+    while url and len(output) < MAX_COLLECTION_TRACKS:
+        data = api_json(url, {"limit": 100} if "?" not in url else None)
+        output.extend(data.get("data", []))
+        url = str(data.get("next") or "")
+    return output[:MAX_COLLECTION_TRACKS]
+
+
+def expand_deezer(item: dict[str, Any]) -> list[dict[str, Any]]:
+    kind = item["kind"]
+    if kind == "song":
+        return [resolve_deezer_track(item)]
+    if kind == "album":
+        raw_tracks = deezer_tracks(f"album/{item['id']}/tracks")
+    elif kind == "playlist":
+        raw_tracks = deezer_tracks(f"playlist/{item['id']}/tracks")
+    elif kind == "artist":
+        raw_tracks = deezer_tracks(f"artist/{item['id']}/top?limit=25")
+    else:
+        raise RuntimeError("Unsupported Deezer result type.")
+    tracks = []
+    for raw in raw_tracks:
+        formatted = format_deezer_result(raw, "song")
+        tracks.append(resolve_deezer_track({key: value for key, value in formatted.items() if key not in {"token", "detail", "preview", "preview_type"}}))
+    return tracks
+
+
+def download_cover(url: str) -> tuple[bytes, str] | None:
+    if not url or not url.startswith("https://"):
+        return None
+    response = requests.get(url, timeout=HTTP_TIMEOUT, stream=True)
+    response.raise_for_status()
+    content_type = response.headers.get("Content-Type", "image/jpeg").split(";", 1)[0]
+    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        return None
+    chunks = []
+    size = 0
+    for chunk in response.iter_content(65536):
+        size += len(chunk)
+        if size > 5 * 1024 * 1024:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks), content_type
+
+
+def tag_id3(path: Path, track: dict[str, Any], cover: tuple[bytes, str] | None) -> None:
+    container = None
+    if path.suffix.lower() == ".wav":
+        container = WAVE(path)
+    elif path.suffix.lower() in {".aif", ".aiff"}:
+        container = AIFF(path)
+    if container is not None:
+        if container.tags is None:
+            container.add_tags()
+        tags = container.tags
+        tags.clear()
+    else:
+        try:
+            tags = ID3(path)
+            tags.clear()
+        except Exception:
+            tags = ID3()
+    tags.add(TIT2(encoding=3, text=track["title"]))
+    tags.add(TPE1(encoding=3, text=track["artist"]))
+    if track.get("album"):
+        tags.add(TALB(encoding=3, text=track["album"]))
+    if track.get("year"):
+        tags.add(TDRC(encoding=3, text=str(track["year"])))
+    if track.get("track_number"):
+        tags.add(TRCK(encoding=3, text=str(track["track_number"])))
+    if track.get("disc_number"):
+        tags.add(TPOS(encoding=3, text=str(track["disc_number"])))
+    tags.add(COMM(encoding=3, lang="eng", desc="Source", text=f"{track['source'].title()} request import"))
+    tags.add(TXXX(encoding=3, desc="SOURCE_ID", text=f"{track['source']}:{track['source_id']}"))
+    if track.get("isrc"):
+        tags.add(TXXX(encoding=3, desc="ISRC", text=track["isrc"]))
+    if cover:
+        data, mime = cover
+        tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=data))
+    if container is not None:
+        container.save()
+    else:
+        tags.save(path, v2_version=3)
+
+
+def tag_mp4(path: Path, track: dict[str, Any], cover: tuple[bytes, str] | None) -> None:
+    audio = MP4(path)
+    audio.clear()
+    audio["\xa9nam"] = [track["title"]]
+    audio["\xa9ART"] = [track["artist"]]
+    if track.get("album"):
+        audio["\xa9alb"] = [track["album"]]
+    if track.get("year"):
+        audio["\xa9day"] = [str(track["year"])]
+    if track.get("track_number"):
+        audio["trkn"] = [(int(track["track_number"]), 0)]
+    if track.get("disc_number"):
+        audio["disk"] = [(int(track["disc_number"]), 0)]
+    audio["\xa9cmt"] = [f"{track['source'].title()} request import"]
+    audio["----:com.apple.iTunes:SOURCE_ID"] = [f"{track['source']}:{track['source_id']}".encode()]
+    if track.get("isrc"):
+        audio["----:com.apple.iTunes:ISRC"] = [str(track["isrc"]).encode()]
+    if cover:
+        data, mime = cover
+        image_format = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
+        if mime in {"image/jpeg", "image/png"}:
+            audio["covr"] = [MP4Cover(data, imageformat=image_format)]
+    audio.save()
+
+
+def tag_vorbis_or_flac(path: Path, track: dict[str, Any], cover: tuple[bytes, str] | None) -> None:
+    audio = MutagenFile(path)
+    if audio is None:
+        raise RuntimeError(f"No metadata writer is available for {path.suffix} files.")
+    audio.clear()
+    values = {
+        "title": track["title"],
+        "artist": track["artist"],
+        "album": track.get("album", ""),
+        "date": str(track.get("year") or ""),
+        "tracknumber": str(track.get("track_number") or ""),
+        "discnumber": str(track.get("disc_number") or ""),
+        "isrc": str(track.get("isrc") or ""),
+        "comment": f"{track['source'].title()} request import",
+        "source_id": f"{track['source']}:{track['source_id']}",
+    }
+    for key, value in values.items():
+        if value:
+            audio[key] = [value]
+    if cover:
+        data, mime = cover
+        picture = Picture()
+        picture.data = data
+        picture.mime = mime
+        picture.type = 3
+        picture.desc = "Cover"
+        if isinstance(audio, FLAC):
+            audio.clear_pictures()
+            audio.add_picture(picture)
+        else:
+            audio["metadata_block_picture"] = [base64.b64encode(picture.write()).decode("ascii")]
+    audio.save()
+
+
+def tag_audio(path: Path, track: dict[str, Any]) -> None:
+    cover = None
+    try:
+        cover = download_cover(str(track.get("cover") or ""))
+    except Exception:
+        pass
+    suffix = path.suffix.lower()
+    if suffix in {".m4a", ".mp4"}:
+        tag_mp4(path, track, cover)
+    elif suffix in {".flac", ".oga", ".ogg", ".opus"}:
+        tag_vorbis_or_flac(path, track, cover)
+    elif suffix in {".mp3", ".mp2", ".aac", ".aif", ".aiff", ".wav"}:
+        tag_id3(path, track, cover)
+    else:
+        audio = MutagenFile(path, easy=True)
+        if audio is None:
+            raise RuntimeError(f"No metadata writer is available for {suffix} files.")
+        audio["title"] = track["title"]
+        audio["artist"] = track["artist"]
+        if track.get("album"):
+            audio["album"] = track["album"]
+        audio.save()
+
+
+def probe_audio(path: Path) -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            FFPROBE, "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name,bit_rate,sample_rate,channels:format=format_name,bit_rate",
+            "-of", "json", str(path),
+        ],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "Downloaded file did not contain valid audio.")
+    data = json.loads(result.stdout or "{}")
+    streams = data.get("streams") or []
+    if not streams or not streams[0].get("codec_name"):
+        raise RuntimeError("Downloaded file did not contain a decodable audio stream.")
+    return {**streams[0], "format_name": (data.get("format") or {}).get("format_name", "")}
+
+
+def remux_or_preserve_audio(source: Path, temp_dir: Path) -> Path:
+    details = probe_audio(source)
+    suffix = source.suffix.lower()
+    codec = str(details.get("codec_name") or "").lower()
+    if suffix in AZURACAST_AUDIO_EXTENSIONS:
+        return source
+    remux_suffix = {
+        "aac": ".m4a",
+        "alac": ".m4a",
+        "flac": ".flac",
+        "mp2": ".mp2",
+        "mp3": ".mp3",
+        "opus": ".opus",
+        "vorbis": ".ogg",
+        "wmav1": ".wma",
+        "wmav2": ".wma",
+    }.get(codec)
+    if remux_suffix:
+        remuxed = temp_dir / f"preserved{remux_suffix}"
+        command = [
+            FFMPEG, "-v", "error", "-y", "-i", str(source), "-map", "0:a:0",
+            "-vn", "-c:a", "copy", str(remuxed),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=600, check=False)
+        if result.returncode == 0 and remuxed.exists():
+            return remuxed
+    lossless = temp_dir / "preserved.flac"
+    result = subprocess.run(
+        [
+            FFMPEG, "-v", "error", "-y", "-i", str(source), "-map", "0:a:0",
+            "-vn", "-c:a", "flac", "-compression_level", "12", str(lossless),
+        ],
+        capture_output=True, text=True, timeout=1800, check=False,
+    )
+    if result.returncode != 0 or not lossless.exists():
+        raise RuntimeError(result.stderr.strip() or "Could not convert the unsupported source to lossless FLAC.")
+    return lossless
+
+
+def azuracast_headers() -> dict[str, str]:
+    return {"X-API-Key": AZURACAST_API_KEY}
+
+
+def find_azuracast_media(track: dict[str, Any]) -> dict[str, Any] | None:
+    if not AZURACAST_ENABLED:
+        return None
+    source_id = str(track.get("source_id") or "")
+    title = clean_text(track.get("title", ""))
+    artist = clean_text(track.get("artist", ""))
+    search_terms = [source_id, title]
+    for search_term in search_terms:
+        if not search_term:
+            continue
+        response = requests.get(
+            station_api("/files"),
+            headers=azuracast_headers(),
+            params={"searchPhrase": search_term, "rowCount": 50},
+            timeout=HTTP_TIMEOUT,
+        )
+        response.raise_for_status()
+        for row in response.json().get("rows", []):
+            path = str(row.get("path") or "")
+            if not path.startswith(f"{UPLOAD_DIR}/"):
+                continue
+            if source_id and source_id.casefold() in path.casefold():
+                return row
+            if (
+                clean_text(row.get("title", "")).casefold() == title.casefold()
+                and clean_text(row.get("artist", "")).casefold() == artist.casefold()
+            ):
+                return row
+    return None
+
+
+def upload_to_azuracast(path: Path, filename: str) -> None:
+    content_types = {
+        ".aac": "audio/aac", ".aif": "audio/aiff", ".aiff": "audio/aiff",
+        ".flac": "audio/flac", ".m4a": "audio/mp4", ".mp2": "audio/mpeg",
+        ".mp3": "audio/mpeg", ".mp4": "audio/mp4", ".oga": "audio/ogg",
+        ".ogg": "audio/ogg", ".opus": "audio/ogg", ".wav": "audio/wav",
+        ".wma": "audio/x-ms-wma",
+    }
+    content_type = content_types.get(path.suffix.lower(), "application/octet-stream")
+    with path.open("rb") as audio:
+        response = requests.post(
+            station_api("/files/upload"),
+            headers=azuracast_headers(),
+            data={"currentDirectory": UPLOAD_DIR},
+            files={"file": (filename, audio, content_type)},
+            timeout=(10, 300),
+        )
+    if not response.ok:
+        raise RuntimeError(f"AzuraCast upload failed: {response.text.strip()[:500]}")
+    result = response.json()
+    if not result.get("success"):
+        raise RuntimeError(str(result.get("message") or "AzuraCast rejected the upload."))
+
+
+def ensure_request_playlist(media: dict[str, Any]) -> None:
+    if not AZURACAST_ENABLED or not REQUEST_PLAYLIST_ID:
+        return
+    playlists = media.get("playlists") or []
+    if any(str(playlist.get("id")) == REQUEST_PLAYLIST_ID for playlist in playlists):
+        return
+    response = requests.put(
+        station_api("/files/batch"),
+        headers={**azuracast_headers(), "Content-Type": "application/json"},
+        json={
+            "do": "playlist",
+            "files": [str(media["path"])],
+            "dirs": [],
+            "playlists": [REQUEST_PLAYLIST_ID],
+        },
+        timeout=HTTP_TIMEOUT,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Could not make the media requestable: {response.text.strip()[:500]}")
+    result = response.json()
+    if result.get("errors"):
+        raise RuntimeError("; ".join(str(error) for error in result["errors"]))
+
+
+def submit_azuracast_request(unique_id: str, request_ip: str) -> str:
+    headers = {
+        "User-Agent": "RequestCast/1.0",
+        "X-Forwarded-For": request_ip,
+        "X-Real-IP": request_ip,
+    }
+    response = requests.post(
+        station_api(f"/request/{unique_id}"),
+        headers=headers,
+        timeout=HTTP_TIMEOUT,
+    )
+    try:
+        result = response.json()
+    except ValueError:
+        result = {}
+    if not response.ok or not result.get("success"):
+        message = result.get("message") or response.text.strip() or f"HTTP {response.status_code}"
+        raise RuntimeError(str(message)[:500])
+    return str(result.get("message") or "The track was requested successfully.")
+
+
+def download_one(track: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
+    video_id = str(track.get("video_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+        raise RuntimeError("The selected result has no valid YouTube audio source.")
+    source_id = safe_filename(str(track.get("source_id") or video_id), video_id)
+    stem = f"{safe_filename(track.get('artist', 'Unknown Artist'))} - {safe_filename(track.get('title', 'Untitled'))} [{track['source']}-{source_id}]"
+    existing_media = find_azuracast_media(track)
+    if existing_media:
+        ensure_request_playlist(existing_media)
+        existing_path = MEDIA_DIR / Path(str(existing_media["path"])).name
+        return "already existed", existing_path, existing_media
+    if not YTDLP:
+        raise RuntimeError(
+            "yt-dlp was not found. Open Settings and install the download tools, "
+            "or put yt-dlp on your PATH."
+        )
+    local_path: Path | None = None
+    with tempfile.TemporaryDirectory(prefix="requestcast-", dir=STATE_DIR) as temp_name:
+        temp_dir = Path(temp_name)
+        command = [
+            YTDLP, "--ignore-config", "--no-plugin-dirs",
+            "--no-playlist", "--no-progress", "--no-warnings", "--socket-timeout", "30",
+            "--retries", "5", "--fragment-retries", "5", "--sleep-requests", "1",
+            "--max-filesize", "500M", "--match-filter", "!is_live & duration < 7200",
+            "-f", "bestaudio/best",
+            "-o", str(temp_dir / "%(id)s.%(ext)s"), f"https://www.youtube.com/watch?v={video_id}",
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=1800, check=False)
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout).strip().splitlines()
+            raise RuntimeError(error[-1] if error else "yt-dlp failed")
+        candidates = [path for path in temp_dir.iterdir() if path.is_file()]
+        if not candidates:
+            raise RuntimeError("yt-dlp completed but did not produce an audio file.")
+        downloaded = max(candidates, key=lambda path: path.stat().st_size)
+        prepared = remux_or_preserve_audio(downloaded, temp_dir)
+        track["artist"] = clean_text(track.get("artist", "")) or "Unknown Artist"
+        track["title"] = clean_youtube_title(track.get("title", "")) or "Untitled"
+        tag_audio(prepared, track)
+        probe_audio(prepared)
+        os.chmod(prepared, 0o644)
+        destination_name = f"{stem}{prepared.suffix.lower()}"
+        if AZURACAST_ENABLED:
+            upload_to_azuracast(prepared, destination_name)
+        else:
+            # Local downloader mode: the download folder is the final destination.
+            DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            local_path = DOWNLOAD_DIR / destination_name
+            shutil.move(str(prepared), local_path)
+    if not AZURACAST_ENABLED:
+        assert local_path is not None
+        return "downloaded", local_path, {"path": str(local_path), "unique_id": ""}
+    for _ in range(10):
+        media = find_azuracast_media(track)
+        if media:
+            ensure_request_playlist(media)
+            media_path = MEDIA_DIR / Path(str(media["path"])).name
+            return "downloaded", media_path, media
+        time.sleep(1)
+    raise RuntimeError("AzuraCast accepted the file but did not return its media record.")
+
+
+def process_job(job: sqlite3.Row) -> None:
+    job_id = job["id"]
+    payload = json.loads(job["payload"])
+    errors = []
+    if payload["source"] == "import":
+        tracks, resolution_errors = expand_import(payload, job_id)
+        errors.extend(resolution_errors)
+    else:
+        tracks = expand_youtube(payload) if payload["source"] == "youtube" else expand_deezer(payload)
+    if not tracks:
+        raise RuntimeError("\n".join(errors) or "This result did not contain any downloadable tracks.")
+    update_job(job_id, total=len(tracks), detail=f"Found {len(tracks)} track(s)")
+    completed = 0
+    first_request_id = ""
+    for number, track in enumerate(tracks, 1):
+        label = f"{track.get('artist', 'Unknown Artist')} — {track.get('title', 'Untitled')}"
+        update_job(job_id, detail=f"Downloading {number} of {len(tracks)}: {label}")
+        try:
+            status, _path, media = download_one(track)
+            completed += 1
+            if not first_request_id:
+                first_request_id = str(media.get("unique_id") or "")
+            update_job(job_id, completed=completed, detail=f"{status.title()}: {label}")
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    if completed == 0:
+        raise RuntimeError("; ".join(errors) or "No tracks were downloaded.")
+    if AZURACAST_ENABLED:
+        detail = f"Finished: {completed} of {len(tracks)} track(s) are ready to request."
+    else:
+        detail = f"Finished: {completed} of {len(tracks)} track(s) saved to {DOWNLOAD_DIR}."
+    if payload.get("_request_after_add") and AZURACAST_ENABLED:
+        if not first_request_id:
+            errors.append("The files were added, but AzuraCast did not return a request ID.")
+        else:
+            update_job(job_id, detail="Added successfully; submitting the request")
+            try:
+                request_message = submit_azuracast_request(
+                    first_request_id, str(payload.get("_request_ip") or "127.0.0.1")
+                )
+                detail += f" {request_message}"
+            except Exception as exc:
+                errors.append(f"Added successfully, but request submission failed: {exc}")
+    if errors:
+        detail += f" {len(errors)} failed."
+    update_job(job_id, state="completed", detail=detail, error="\n".join(errors)[:8000])
+
+
+def worker_loop() -> None:
+    while True:
+        if not config.is_configured(SETTINGS):
+            time.sleep(2)
+            continue
+        try:
+            job = claim_job()
+        except sqlite3.Error:
+            time.sleep(2)
+            continue
+        if not job:
+            time.sleep(2)
+            continue
+        try:
+            process_job(job)
+        except Exception as exc:
+            update_job(job["id"], state="failed", detail="Download failed", error=str(exc)[:8000])
+
+
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    """First-run configuration, and the settings page afterwards."""
+    settings = dict(SETTINGS)
+    first_run = not config.is_configured(settings)
+    if request.method == "POST":
+        if not first_run:
+            require_csrf()
+        submitted = {
+            "download_dir": request.form.get("download_dir", "").strip(),
+            "azuracast_enabled": bool(request.form.get("azuracast_enabled")),
+            "azuracast_api_base": request.form.get("azuracast_api_base", "").strip().rstrip("/"),
+            "azuracast_api_key": request.form.get("azuracast_api_key", "").strip(),
+            "azuracast_station_id": request.form.get("azuracast_station_id", "").strip() or config.DEFAULT_STATION_ID,
+            "azuracast_request_playlist_id": request.form.get("azuracast_request_playlist_id", "").strip(),
+            "azuracast_media_dir": request.form.get("azuracast_media_dir", "").strip(),
+            "azuracast_upload_dir": request.form.get("azuracast_upload_dir", "").strip() or config.DEFAULT_UPLOAD_DIRECTORY,
+            "bind_host": request.form.get("bind_host", "").strip() or config.DEFAULT_BIND_HOST,
+            "bind_port": request.form.get("bind_port", "").strip() or config.DEFAULT_BIND_PORT,
+        }
+        problems = validate_setup(submitted, request.form.get("password", ""))
+        if problems:
+            for problem in problems:
+                flash(problem)
+            return render_template(
+                "setup.html", settings={**settings, **submitted},
+                first_run=first_run, missing_tools=tools.missing_tools(settings),
+                can_auto_install=tools.can_auto_install(), config_path=str(config.config_path()),
+            ), 400
+        merged = {**settings, **submitted}
+        password = request.form.get("password", "")
+        if password:
+            salt = os.urandom(32)
+            merged["password_salt"] = salt.hex()
+            merged["password_hash"] = hash_password(password, salt).hex()
+        elif request.form.get("clear_password"):
+            merged["password_salt"] = ""
+            merged["password_hash"] = ""
+        if not merged.get("secret_key"):
+            merged["secret_key"] = config.new_secret_key()
+        merged["state_dir"] = merged.get("state_dir") or str(config.default_state_dir())
+        config.save(merged)
+        apply_settings(config.load())
+        session["authenticated"] = True
+        session.setdefault("nonce", uuid.uuid4().hex)
+        flash("Settings saved.")
+        return redirect(url_for("index"))
+    return render_template(
+        "setup.html", settings=settings, first_run=first_run,
+        missing_tools=tools.missing_tools(settings),
+        can_auto_install=tools.can_auto_install(), config_path=str(config.config_path()),
+    )
+
+
+def validate_setup(submitted: dict[str, Any], password: str) -> list[str]:
+    problems: list[str] = []
+    download_dir = submitted.get("download_dir", "")
+    if not download_dir:
+        problems.append("Choose a folder for downloaded music.")
+    else:
+        try:
+            Path(download_dir).expanduser().mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            problems.append(f"That download folder cannot be used: {exc}")
+    if submitted.get("azuracast_enabled"):
+        if not submitted.get("azuracast_api_base"):
+            problems.append("Enter the AzuraCast base API address, for example http://127.0.0.1:12000/api.")
+        if not submitted.get("azuracast_api_key"):
+            problems.append("Enter an AzuraCast API key, or turn AzuraCast off to use local downloads only.")
+    host = submitted.get("bind_host", "")
+    if host not in {"127.0.0.1", "localhost", "::1"} and not password and not PASSWORD_HASH:
+        problems.append(
+            "Set a password before listening on a network address, or bind to 127.0.0.1 "
+            "so only this computer can reach the program."
+        )
+    return problems
+
+
+@app.post("/setup/tools")
+def setup_tools():
+    """Fetch yt-dlp and ffmpeg into the program folder."""
+    if not config.is_configured(SETTINGS):
+        pass
+    else:
+        require_csrf()
+    if not tools.can_auto_install():
+        flash("Install yt-dlp and ffmpeg with your system package manager, then reload this page.")
+        return redirect(url_for("setup"))
+    try:
+        updates = tools.install_missing(SETTINGS)
+    except Exception as exc:
+        flash(f"The download tools could not be installed: {exc}")
+        return redirect(url_for("setup"))
+    if updates:
+        merged = {**SETTINGS, **updates}
+        if config.is_configured(merged):
+            config.save(merged)
+        apply_settings(merged)
+        flash("The download tools are installed.")
+    else:
+        flash("The download tools were already available.")
+    return redirect(url_for("setup"))
+
+
+apply_settings()
+
+worker = None
+if os.environ.get("REQUESTCAST_DISABLE_WORKER") != "1" and os.environ.get("ADDTO_DISABLE_WORKER") != "1":
+    worker = threading.Thread(target=worker_loop, name="download-worker", daemon=True)
+    worker.start()

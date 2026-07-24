@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Download status — RequestCast{% endblock %}
+{% block content %}
+<h1>Download status</h1>
+<section aria-labelledby="job-name">
+  <h2 id="job-name">{{ job['label'] }}</h2>
+  <dl>
+    <dt>Status</dt><dd>{{ job['state'] }}</dd>
+    {% if job['total'] %}<dt>Progress</dt><dd>{{ job['completed'] }} of {{ job['total'] }} tracks</dd>{% endif %}
+    <dt>Current activity</dt><dd>{{ job['detail'] }}</dd>
+  </dl>
+  {% if job['error'] %}<h3>Problems</h3><pre class="error">{{ job['error'] }}</pre>{% endif %}
+  {% if job['state'] in ['queued','running'] %}<p>This page does not auto-refresh so it will not interrupt a screen reader.</p>{% endif %}
+  <p><a class="button" href="{{ url_for('job_status', job_id=job['id']) }}">Refresh status</a> <a href="{{ url_for('index') }}">Return to search</a></p>
+</section>
+{% endblock %}

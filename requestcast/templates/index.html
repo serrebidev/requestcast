@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Find music to add</h1>
+<p>Search YouTube Music and Deezer without signing in, or paste a YouTube or Deezer URL. Added audio goes to the request-only library and never enters regular rotation. The highest-quality available audio stream is kept in its original supported format; unsupported containers are remuxed without re-encoding whenever possible.</p>
+
+<form method="get" class="search-form" role="search">
+  <label for="q">Keyword, artist, song, album, playlist, or YouTube/Deezer URL</label>
+  <input id="q" name="q" type="search" value="{{ query }}" maxlength="2048" required autofocus>
+  <p class="hint">When you enter a URL, its source and result type are detected automatically.</p>
+  <div class="field-row">
+    <div>
+      <label for="source">Search source</label>
+      <select id="source" name="source">
+        <option value="both"{% if source == 'both' %} selected{% endif %}>YouTube and Deezer</option>
+        <option value="youtube"{% if source == 'youtube' %} selected{% endif %}>YouTube only</option>
+        <option value="deezer"{% if source == 'deezer' %} selected{% endif %}>Deezer only</option>
+      </select>
+    </div>
+    <div>
+      <label for="kind">Result type</label>
+      <select id="kind" name="kind">
+        {% for value, label in [('all','Everything'),('song','Songs'),('video','Videos'),('album','Albums'),('artist','Artists'),('playlist','Playlists')] %}
+        <option value="{{ value }}"{% if kind == value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+  <button type="submit">Search or open URL</button>
+</form>
+
+<section aria-labelledby="file-import-heading">
+  <h2 id="file-import-heading">Upload a music list</h2>
+  <p>Upload a TXT, XLSX, or PDF list and the site will index its contents, find the music, and add it to your music library in the background. XLSX and table-style PDFs use the first two columns as artist and title. In TXT files, use one artist per line, <code>Artist - Title</code> for a specific song, or one supported YouTube or Deezer URL per line. Where Deezer has the same track, its version is used so the tags stay clean.</p>
+  <form method="post" action="{{ url_for('queue_file_import') }}" enctype="multipart/form-data" class="search-form">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <label for="file">Music list file</label>
+    <input id="file" name="file" type="file" accept=".txt,.xlsx,.pdf,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf" required>
+    <label for="artist_tracks">Tracks to take from each artist-only line</label>
+    <select id="artist_tracks" name="artist_tracks">
+      <option value="all" selected>Every track in the artist's catalogue</option>
+      <option value="100">Top 100 tracks</option>
+      <option value="50">Top 50 tracks</option>
+      <option value="25">Top 25 tracks</option>
+      <option value="10">Top 10 tracks</option>
+    </select>
+    <p class="hint">This only affects lines that name an artist alone. Lines with both an artist and a title always add that one song. Taking every track from a long list of artists can queue thousands of downloads and run for a long time.</p>
+    <p class="hint">Maximum file size: 16 MB. A file may contain up to 10,000 unique entries.</p>
+    <button type="submit">Upload, index, and add all entries</button>
+  </form>
+</section>
+
+{% if errors %}
+<section aria-labelledby="search-errors"><h2 id="search-errors">Search notices</h2>
+  {% for error in errors %}<p class="error" role="alert">{{ error }}</p>{% endfor %}
+</section>
+{% endif %}
+
+{% if query %}
+<section aria-labelledby="results-heading">
+  <h2 id="results-heading">{% if url_input %}URL result{% else %}Search results{% endif %}{% if results %} ({{ results|length }}){% endif %}</h2>
+  {% if not results and not errors %}<p>No results found.</p>{% endif %}
+  <ol class="results">
+  {% for item in results %}
+    <li class="result">
+      <h3>{{ item.title }}</h3>
+      <p><span class="badge">{{ item.source }}</span> <span class="badge">{{ item.kind }}</span>{% if item.detail %} — {{ item.detail }}{% endif %}</p>
+      {% if item.cover %}<img class="cover" src="{{ item.cover }}" alt="" loading="lazy">{% endif %}
+      {% if item.preview_type == 'audio' %}
+        <audio controls preload="none" src="{{ item.preview }}">Your browser cannot play this Deezer preview.</audio>
+      {% elif item.preview_type == 'youtube' %}
+        <details>
+          <summary>Preview on YouTube</summary>
+          <iframe title="Preview {{ item.title }}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" src="https://www.youtube-nocookie.com/embed/{{ item.preview }}?" allow="encrypted-media; picture-in-picture" allowfullscreen></iframe>
+        </details>
+      {% else %}
+        <p>No direct preview is available for this collection. Its tracks will be resolved individually.</p>
+      {% endif %}
+      <form method="post" action="{{ url_for('queue_download') }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="token" value="{{ item.token }}">
+        <button type="submit" name="action" value="add">{% if item.kind in ['song','video'] %}Add this track{% elif item.kind == 'artist' %}Add top tracks from this artist{% else %}Add this {{ item.kind }}{% endif %}</button>
+        <button type="submit" name="action" value="add_request">{% if item.kind in ['song','video'] %}Add and request this track{% else %}Add and request the first track{% endif %}</button>
+      </form>
+    </li>
+  {% endfor %}
+  </ol>
+</section>
+{% endif %}
+
+<section aria-labelledby="jobs-heading">
+  <h2 id="jobs-heading">Recent downloads</h2>
+  {% if jobs %}
+  <ul class="jobs">
+    {% for job in jobs %}<li><a href="{{ url_for('job_status', job_id=job['id']) }}">{{ job['label'] }}</a>: {{ job['state'] }}{% if job['total'] %}, {{ job['completed'] }} of {{ job['total'] }}{% endif %}</li>{% endfor %}
+  </ul>
+  {% else %}<p>No downloads have been queued yet.</p>{% endif %}
+</section>
+{% endblock %}
