@@ -26,6 +26,7 @@ DEFAULT_STATION_ID = "1"
 DEFAULT_UPLOAD_DIRECTORY = "Requests"
 DEFAULT_BIND_HOST = "127.0.0.1"
 DEFAULT_BIND_PORT = 8797
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 # Written by the setup page; read by everything else.
 FIELDS: dict[str, Any] = {
@@ -43,6 +44,7 @@ FIELDS: dict[str, Any] = {
     "secret_key": "",
     "bind_host": DEFAULT_BIND_HOST,
     "bind_port": DEFAULT_BIND_PORT,
+    "secure_cookies": True,
     "ytdlp_path": "",
     "ffmpeg_path": "",
     "ffprobe_path": "",
@@ -63,6 +65,7 @@ ENVIRONMENT_NAMES: dict[str, tuple[str, ...]] = {
     "secret_key": ("REQUESTCAST_SECRET_KEY", "ADDTO_SECRET_KEY"),
     "bind_host": ("REQUESTCAST_BIND_HOST",),
     "bind_port": ("REQUESTCAST_BIND_PORT",),
+    "secure_cookies": ("REQUESTCAST_SECURE_COOKIES",),
     "ytdlp_path": ("REQUESTCAST_YTDLP", "ADDTO_YTDLP"),
     "ffmpeg_path": ("REQUESTCAST_FFMPEG",),
     "ffprobe_path": ("REQUESTCAST_FFPROBE",),

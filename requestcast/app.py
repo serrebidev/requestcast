@@ -115,8 +115,9 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     PASSWORD_HASH = bytes.fromhex(SETTINGS["password_hash"]) if SETTINGS.get("password_hash") else b""
 
     app.secret_key = SECRET_KEY or "setup-mode-only"
-    # A cookie marked Secure never reaches a plain-HTTP localhost session.
-    app.config["SESSION_COOKIE_SECURE"] = SETTINGS.get("bind_host") not in {"127.0.0.1", "localhost", "::1"}
+    # Secure by default. The portable build turns this off when it saves a loopback
+    # bind, because a Secure cookie is not sent over plain HTTP.
+    app.config["SESSION_COOKIE_SECURE"] = bool(SETTINGS.get("secure_cookies", True))
     signer = URLSafeTimedSerializer(SECRET_KEY or "setup-mode-only", salt="requestcast-result-v1")
 
     for directory in (STATE_DIR, DOWNLOAD_DIR):
@@ -1742,6 +1743,8 @@ def setup():
             "bind_host": request.form.get("bind_host", "").strip() or config.DEFAULT_BIND_HOST,
             "bind_port": request.form.get("bind_port", "").strip() or config.DEFAULT_BIND_PORT,
         }
+        # Serving plain HTTP on this machine means the session cookie cannot be Secure.
+        submitted["secure_cookies"] = submitted["bind_host"] not in config.LOOPBACK_HOSTS
         problems = validate_setup(submitted, request.form.get("password", ""))
         if problems:
             for problem in problems:
