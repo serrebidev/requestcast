@@ -29,8 +29,8 @@ class HttpServerController:
 
 
 def selected_http_backend() -> str:
-    """Use deterministic HTTP/1.0 framing on Windows."""
-    return "werkzeug-http10-buffered" if os.name == "nt" else "waitress-buffered"
+    """Use Werkzeug on Windows, with deterministic HTTP/1.0 framing."""
+    return "werkzeug-threaded" if os.name == "nt" else "waitress"
 
 
 def tcp_port_is_open(host: str, port: int, timeout: float = 0.5) -> bool:
@@ -59,7 +59,7 @@ def show_startup_error(message: str) -> None:
 def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
     """Create the dependable platform-specific HTTP server."""
     if os.name == "nt":
-        from werkzeug.serving import make_server
+        from werkzeug.serving import WSGIRequestHandler, make_server
 
         if server.is_loopback_host(host):
             bind_host = "127.0.0.1"
@@ -68,13 +68,8 @@ def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
         else:
             bind_host = host
 
-        instance = make_server(
-            bind_host,
-            port,
-            app,
-            threaded=True,
-            request_handler=RequestCastHTTP10RequestHandler,
-        )
+        WSGIRequestHandler.protocol_version = RequestCastHTTP10RequestHandler.protocol_version
+        instance = make_server(bind_host, port, app, threaded=True)
 
         def close_werkzeug() -> None:
             instance.shutdown()
@@ -86,7 +81,7 @@ def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
             "connection=close"
         )
         return HttpServerController(
-            "werkzeug-http10-buffered",
+            "werkzeug-threaded",
             instance.serve_forever,
             close_werkzeug,
         )
@@ -106,7 +101,7 @@ def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
                 f"Waitress bind selected: {bind_options}; framing=buffered-content-length; "
                 "connection=close"
             )
-            return HttpServerController("waitress-buffered", instance.run, instance.close)
+            return HttpServerController("waitress", instance.run, instance.close)
         except BaseException as exc:
             bind_error = exc
             server.log_startup(f"Waitress bind failed {bind_options}: {exc!r}")
