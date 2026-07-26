@@ -18,14 +18,15 @@ def main() -> int:
         print("Packaged imports succeeded.")
         return 0
 
+    diagnostic_only = "--diagnose" in sys.argv
     settings = config.load()
     host = str(settings.get("bind_host") or config.DEFAULT_BIND_HOST)
     port = int(settings.get("bind_port") or config.DEFAULT_BIND_PORT)
     urls = server.browser_urls(host, port)
     launch_url = server.preferred_browser_url(host, port)
 
-    if "--diagnose" in sys.argv:
-        print("Collecting full RequestCast diagnostics. This may take a minute.", flush=True)
+    if diagnostic_only and server.requestcast_is_reachable(launch_url, timeout=1.0):
+        print("Collecting diagnostics from the running RequestCast server.", flush=True)
         diagnostics.collect_bundle(urls, duration=20.0, show_dialog=True)
         return 0
 
@@ -88,6 +89,14 @@ def main() -> int:
 
     server_thread = threading.Thread(target=run_server, name="requestcast-web-server", daemon=False)
     server_thread.start()
+
+    if diagnostic_only:
+        print("A temporary RequestCast server was started for full diagnostics.", flush=True)
+        diagnostics.collect_bundle(urls, duration=20.0, show_dialog=True)
+        http_server.close()
+        server_thread.join(timeout=5)
+        return 0 if not server_errors else 1
+
     diagnostics.start_background_collection(urls, duration=30.0)
 
     if not config.is_configured(settings):
