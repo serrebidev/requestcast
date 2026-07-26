@@ -8,6 +8,7 @@
 body { margin: 0; line-height: 1.55; }
 header { background: #18212c; border-bottom: 1px solid #405168; padding: .8rem 1rem; }
 .header-row { align-items: center; display: flex; justify-content: space-between; margin: auto; max-width: 76rem; }
+.header-actions { align-items: center; display: flex; gap: 1rem; }
 .site-name { font-size: 1.25rem; font-weight: 700; margin: 0; }
 main { margin: auto; max-width: 76rem; padding: 1rem; }
 footer { border-top: 1px solid #405168; margin-top: 2rem; padding: .8rem 1rem; text-align: center; }

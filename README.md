@@ -37,8 +37,10 @@ On first run it asks for:
 1. **A download folder.** The only required answer.
 2. **AzuraCast details** — optional. Leave the box unticked and RequestCast is a plain music
    downloader that saves tagged files to your download folder.
-3. **A password** — required only if you let it listen on a network address rather than
-   `127.0.0.1`.
+3. **A password** — opens RequestCast.
+4. **An admin password** — protects Preferences.
+
+Use **Preferences** to change these later.
 
 ### Building it yourself
 
@@ -71,6 +73,8 @@ REQUESTCAST_REQUEST_PLAYLIST_ID=10
 REQUESTCAST_SECRET_KEY=...
 REQUESTCAST_PASSWORD_SALT=...   # 32 bytes, hex
 REQUESTCAST_PASSWORD_HASH=...   # scrypt, hex
+REQUESTCAST_ADMIN_PASSWORD_SALT=...
+REQUESTCAST_ADMIN_PASSWORD_HASH=...
 REQUESTCAST_DEEZER_ARL=...      # optional Deezer subscriber ARL
 ```
 

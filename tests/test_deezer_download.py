@@ -193,6 +193,8 @@ with (
         "download_dir": tempfile.gettempdir(),
         "bind_host": "127.0.0.1",
         "bind_port": "8797",
+        "password": "ListenerPass",
+        "admin_password": "AdminPass",
         "deezer_arl": "a" * 192,
     })
 assert response.status_code == 302, response.status_code

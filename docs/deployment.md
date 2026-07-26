@@ -22,13 +22,15 @@ Never reuse a key from anywhere else, and keep the file out of version control.
 ```bash
 python3 - <<'EOF'
 import hashlib, os, secrets
-password = input("Portal password: ")
-salt = os.urandom(32)
-digest = hashlib.scrypt(password.encode(), salt=salt, n=2**15, r=8, p=1,
-                        dklen=32, maxmem=64 * 1024 * 1024)
 print("REQUESTCAST_SECRET_KEY=" + secrets.token_urlsafe(48))
-print("REQUESTCAST_PASSWORD_SALT=" + salt.hex())
-print("REQUESTCAST_PASSWORD_HASH=" + digest.hex())
+for label, prefix in (("Portal", "REQUESTCAST_PASSWORD"),
+                      ("Admin", "REQUESTCAST_ADMIN_PASSWORD")):
+    password = input(f"{label} password: ")
+    salt = os.urandom(32)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**15, r=8, p=1,
+                            dklen=32, maxmem=64 * 1024 * 1024)
+    print(prefix + "_SALT=" + salt.hex())
+    print(prefix + "_HASH=" + digest.hex())
 EOF
 ```
 
@@ -43,6 +45,8 @@ REQUESTCAST_STATE_DIR=/var/lib/requestcast/state
 REQUESTCAST_SECRET_KEY=...
 REQUESTCAST_PASSWORD_SALT=...
 REQUESTCAST_PASSWORD_HASH=...
+REQUESTCAST_ADMIN_PASSWORD_SALT=...
+REQUESTCAST_ADMIN_PASSWORD_HASH=...
 
 # Optional. Omit every AZURACAST line to run as a plain downloader.
 REQUESTCAST_AZURACAST_API_BASE=http://127.0.0.1:12000/api

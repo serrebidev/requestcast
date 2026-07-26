@@ -78,6 +78,8 @@ UPLOAD_DIR = config.DEFAULT_UPLOAD_DIRECTORY
 SECRET_KEY = ""
 PASSWORD_SALT = b""
 PASSWORD_HASH = b""
+ADMIN_PASSWORD_SALT = b""
+ADMIN_PASSWORD_HASH = b""
 DEEZER: deezer.DeezerClient | None = None
 DEEZER_ERROR = ""
 signer: URLSafeTimedSerializer | None = None
@@ -91,7 +93,8 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     """Load settings into module state. Safe to call again after the setup page saves."""
     global SETTINGS, STATE_DIR, DOWNLOAD_DIR, MEDIA_DIR, DB_PATH, YTDLP, FFMPEG, FFPROBE
     global AZURACAST_ENABLED, AZURACAST_API_BASE, AZURACAST_API_KEY, STATION_ID
-    global REQUEST_PLAYLIST_ID, UPLOAD_DIR, SECRET_KEY, PASSWORD_SALT, PASSWORD_HASH, signer
+    global REQUEST_PLAYLIST_ID, UPLOAD_DIR, SECRET_KEY, PASSWORD_SALT, PASSWORD_HASH
+    global ADMIN_PASSWORD_SALT, ADMIN_PASSWORD_HASH, signer
     global DEEZER, DEEZER_ERROR
 
     SETTINGS = new_settings if new_settings is not None else config.load()
@@ -116,6 +119,8 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     SECRET_KEY = str(SETTINGS.get("secret_key", ""))
     PASSWORD_SALT = bytes.fromhex(SETTINGS["password_salt"]) if SETTINGS.get("password_salt") else b""
     PASSWORD_HASH = bytes.fromhex(SETTINGS["password_hash"]) if SETTINGS.get("password_hash") else b""
+    ADMIN_PASSWORD_SALT = bytes.fromhex(SETTINGS["admin_password_salt"]) if SETTINGS.get("admin_password_salt") else b""
+    ADMIN_PASSWORD_HASH = bytes.fromhex(SETTINGS["admin_password_hash"]) if SETTINGS.get("admin_password_hash") else b""
 
     # A configured ARL makes Deezer the default audio source. A bad or expired ARL must
     # never stop the rest of the program, so any failure just means "no Deezer downloads".
@@ -211,6 +216,12 @@ def verify_password(candidate: str) -> bool:
     return hmac.compare_digest(hash_password(candidate, PASSWORD_SALT), PASSWORD_HASH)
 
 
+def verify_admin_password(candidate: str) -> bool:
+    if not ADMIN_PASSWORD_HASH:
+        return False
+    return hmac.compare_digest(hash_password(candidate, ADMIN_PASSWORD_SALT), ADMIN_PASSWORD_HASH)
+
+
 def csrf_token() -> str:
     nonce = session.get("nonce", "")
     return hmac.new(SECRET_KEY.encode(), nonce.encode(), hashlib.sha256).hexdigest()
@@ -231,16 +242,19 @@ def require_login() -> Any:
         if request.endpoint in {"setup", "setup_tools"}:
             return None
         return redirect(url_for("setup"))
-    if request.endpoint in {"setup", "setup_tools"} and not session.get("authenticated"):
-        return redirect(url_for("login"))
+    if request.endpoint == "setup":
+        return redirect(url_for("preferences"))
     if request.endpoint == "login":
         return None
     if not password_required():
         session["authenticated"] = True
         session.setdefault("nonce", uuid.uuid4().hex)
-        return None
-    if not session.get("authenticated"):
+    elif not session.get("authenticated"):
         return redirect(url_for("login", next=request.full_path.rstrip("?")))
+    if request.endpoint == "admin_login":
+        return None
+    if request.endpoint in {"preferences", "setup_tools"} and not session.get("admin_authenticated"):
+        return redirect(url_for("admin_login", next=request.full_path.rstrip("?")))
     return None
 
 
@@ -300,6 +314,54 @@ def login():
             return redirect(destination)
         return render_template("login.html", error="Incorrect password."), 401
     return render_template("login.html", error=None, next=request.args.get("next", ""))
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    setting_admin_password = not ADMIN_PASSWORD_HASH
+    if request.method == "POST":
+        destination = request.form.get("next", "")
+        if not rate_allowed("admin-login", client_ip(), 6, 300):
+            return render_template(
+                "admin_login.html", error="Too many attempts. Try again later.",
+                next=destination, setting_admin_password=setting_admin_password,
+            ), 429
+        if setting_admin_password:
+            require_csrf()
+            password = request.form.get("password", "")
+            if not password:
+                return render_template(
+                    "admin_login.html", error="Set an admin password.",
+                    next=destination, setting_admin_password=True,
+                ), 400
+            salt = os.urandom(32)
+            merged = {
+                **SETTINGS,
+                "admin_password_salt": salt.hex(),
+                "admin_password_hash": hash_password(password, salt).hex(),
+            }
+            config.save(merged)
+            apply_settings(config.load())
+            session["admin_authenticated"] = True
+            session.permanent = True
+            if not destination.startswith("/") or destination.startswith("//"):
+                destination = url_for("preferences")
+            return redirect(destination)
+        if verify_admin_password(request.form.get("password", "")):
+            session["admin_authenticated"] = True
+            session.setdefault("nonce", uuid.uuid4().hex)
+            session.permanent = True
+            if not destination.startswith("/") or destination.startswith("//"):
+                destination = url_for("preferences")
+            return redirect(destination)
+        return render_template(
+            "admin_login.html", error="Incorrect admin password.", next=destination,
+            setting_admin_password=False,
+        ), 401
+    return render_template(
+        "admin_login.html", error=None, next=request.args.get("next", ""),
+        setting_admin_password=setting_admin_password,
+    )
 
 
 @app.post("/logout")
@@ -1777,9 +1839,8 @@ def worker_loop() -> None:
             update_job(job["id"], state="failed", detail="Download failed", error=str(exc)[:8000])
 
 
-@app.route("/setup", methods=["GET", "POST"])
-def setup():
-    """First-run configuration, and the settings page afterwards."""
+def settings_page():
+    """Handle first-run setup and later admin preferences."""
     settings = dict(SETTINGS)
     first_run = not config.is_configured(settings)
     if request.method == "POST":
@@ -1800,7 +1861,15 @@ def setup():
         }
         # Serving plain HTTP on this machine means the session cookie cannot be Secure.
         submitted["secure_cookies"] = submitted["bind_host"] not in config.LOOPBACK_HOSTS
-        problems = validate_setup(submitted, request.form.get("password", ""))
+        password = request.form.get("password", "")
+        admin_password = request.form.get("admin_password", "")
+        problems = validate_setup(
+            submitted,
+            password,
+            clear_password=bool(request.form.get("clear_password")),
+            require_passwords=first_run,
+            admin_password=admin_password,
+        )
         if problems:
             for problem in problems:
                 flash(problem)
@@ -1808,9 +1877,9 @@ def setup():
                 "setup.html", settings={**settings, **submitted},
                 first_run=first_run, missing_tools=tools.missing_tools(settings),
                 can_auto_install=tools.can_auto_install(), config_path=str(config.config_path()),
+                form_endpoint="setup" if first_run else "preferences",
             ), 400
         merged = {**settings, **submitted}
-        password = request.form.get("password", "")
         if password:
             salt = os.urandom(32)
             merged["password_salt"] = salt.hex()
@@ -1818,23 +1887,42 @@ def setup():
         elif request.form.get("clear_password"):
             merged["password_salt"] = ""
             merged["password_hash"] = ""
+        if admin_password:
+            admin_salt = os.urandom(32)
+            merged["admin_password_salt"] = admin_salt.hex()
+            merged["admin_password_hash"] = hash_password(admin_password, admin_salt).hex()
         if not merged.get("secret_key"):
             merged["secret_key"] = config.new_secret_key()
         merged["state_dir"] = merged.get("state_dir") or str(config.default_state_dir())
         config.save(merged)
         apply_settings(config.load())
         session["authenticated"] = True
+        session["admin_authenticated"] = True
         session.setdefault("nonce", uuid.uuid4().hex)
-        flash("Settings saved.")
-        return redirect(url_for("index"))
+        flash("Setup saved." if first_run else "Preferences saved.")
+        return redirect(url_for("index" if first_run else "preferences"))
     return render_template(
         "setup.html", settings=settings, first_run=first_run,
         missing_tools=tools.missing_tools(settings),
         can_auto_install=tools.can_auto_install(), config_path=str(config.config_path()),
+        form_endpoint="setup" if first_run else "preferences",
     )
 
 
-def validate_setup(submitted: dict[str, Any], password: str) -> list[str]:
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    return settings_page()
+
+
+@app.route("/preferences", methods=["GET", "POST"])
+def preferences():
+    return settings_page()
+
+
+def validate_setup(
+    submitted: dict[str, Any], password: str, *, clear_password: bool = False,
+    require_passwords: bool = False, admin_password: str = "",
+) -> list[str]:
     problems: list[str] = []
     download_dir = submitted.get("download_dir", "")
     if not download_dir:
@@ -1850,11 +1938,16 @@ def validate_setup(submitted: dict[str, Any], password: str) -> list[str]:
         if not submitted.get("azuracast_api_key"):
             problems.append("Enter an AzuraCast API key, or turn AzuraCast off to use local downloads only.")
     host = submitted.get("bind_host", "")
-    if host not in {"127.0.0.1", "localhost", "::1"} and not password and not PASSWORD_HASH:
+    no_password = clear_password or (not password and not PASSWORD_HASH)
+    if require_passwords and not password:
+        problems.append("Set a password.")
+    elif host not in config.LOOPBACK_HOSTS and no_password:
         problems.append(
             "Set a password before listening on a network address, or bind to 127.0.0.1 "
             "so only this computer can reach the program."
         )
+    if require_passwords and not admin_password:
+        problems.append("Set an admin password.")
     return problems
 
 
@@ -1867,12 +1960,12 @@ def setup_tools():
         require_csrf()
     if not tools.can_auto_install():
         flash("Install yt-dlp and ffmpeg with your system package manager, then reload this page.")
-        return redirect(url_for("setup"))
+        return redirect(url_for("setup" if not config.is_configured(SETTINGS) else "preferences"))
     try:
         updates = tools.install_missing(SETTINGS)
     except Exception as exc:
         flash(f"The download tools could not be installed: {exc}")
-        return redirect(url_for("setup"))
+        return redirect(url_for("setup" if not config.is_configured(SETTINGS) else "preferences"))
     if updates:
         merged = {**SETTINGS, **updates}
         if config.is_configured(merged):
@@ -1881,7 +1974,7 @@ def setup_tools():
         flash("The download tools are installed.")
     else:
         flash("The download tools were already available.")
-    return redirect(url_for("setup"))
+    return redirect(url_for("setup" if not config.is_configured(SETTINGS) else "preferences"))
 
 
 apply_settings()

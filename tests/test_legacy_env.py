@@ -67,9 +67,12 @@ try:
     assert appmod.app.config["SESSION_COOKIE_SECURE"] is True
     print("secure_cookie_kept_behind_proxy=passed")
 
-    # The setup page is unreachable once the environment has configured everything.
+    # Setup becomes Preferences after configuration, and Preferences requires both logins.
     client = appmod.app.test_client()
     response = client.get("/setup")
+    assert response.status_code == 302
+    assert "/preferences" in response.headers["Location"], response.headers["Location"]
+    response = client.get("/preferences")
     assert response.status_code == 302
     assert "/login" in response.headers["Location"], response.headers["Location"]
     print("setup_locked_behind_login=passed")

@@ -1,4 +1,4 @@
-"""First run with no settings, no AzuraCast, and no password."""
+"""First run requires both passwords and supports local-only downloads."""
 
 from pathlib import Path
 import os
@@ -33,16 +33,23 @@ try:
     assert page.status_code == 200
     assert b"Download folder" in page.data
     assert b"Send finished downloads to an AzuraCast station" in page.data
+    assert b'input id="password" name="password" type="password" required' in page.data
+    assert b'input id="admin_password" name="admin_password" type="password"' in page.data
+    assert b"Default:" not in page.data
     print("setup_page_renders=passed")
 
-    # Refusing to listen on the network without a password.
-    refused = client.post("/setup", data={"download_dir": str(WORKSPACE / "music"), "bind_host": "0.0.0.0"})
+    # Both passwords are required, even in local-only mode.
+    refused = client.post("/setup", data={"download_dir": str(WORKSPACE / "music"), "bind_host": "127.0.0.1"})
     assert refused.status_code == 400, refused.status_code
     assert b"Set a password" in refused.data
-    print("network_bind_requires_password=passed")
+    assert b"Set an admin password" in refused.data
+    print("first_run_requires_both_passwords=passed")
 
     downloads = WORKSPACE / "music"
-    saved = client.post("/setup", data={"download_dir": str(downloads), "bind_host": "127.0.0.1"})
+    saved = client.post("/setup", data={
+        "download_dir": str(downloads), "bind_host": "127.0.0.1",
+        "password": "ListenerPass", "admin_password": "InitialAdmin",
+    })
     assert saved.status_code == 302, saved.status_code
     assert saved.headers["Location"].endswith("/")
     print("setup_saves=passed")
@@ -52,14 +59,18 @@ try:
     assert stored["download_dir"] == str(downloads)
     assert stored["secret_key"], "a session key should have been generated"
     assert stored["azuracast_enabled"] is False
-    assert stored["password_hash"] == "", "no password was set"
+    assert stored["password_hash"], "the listener password should be hashed"
+    assert stored["admin_password_hash"], "the admin password should be hashed"
+    assert stored["admin_password_salt"], "the admin password should have a unique salt"
+    assert appmod.verify_password("ListenerPass")
+    assert appmod.verify_admin_password("InitialAdmin")
     print("settings_written=passed")
 
-    # Local mode: no password, so the search page is reachable straight away.
+    # Setup authenticates the new session straight away.
     home = client.get("/")
     assert home.status_code == 200, home.status_code
     assert b"Upload a music list" in home.data
-    print("local_mode_no_password=passed")
+    print("setup_session_authenticated=passed")
 
     assert appmod.AZURACAST_ENABLED is False
     assert appmod.MEDIA_DIR == downloads, appmod.MEDIA_DIR
@@ -67,10 +78,10 @@ try:
     print("local_mode_paths=passed")
 
     # AzuraCast on, but with nothing filled in, must be rejected rather than half-configured.
-    settings_page = client.get("/setup")
+    settings_page = client.get("/preferences")
     csrf = re.search(r'name="csrf" value="([0-9a-f]{64})"', settings_page.data.decode())
     assert csrf, "the settings form should carry a CSRF token once configured"
-    bad = client.post("/setup", data={
+    bad = client.post("/preferences", data={
         "csrf": csrf.group(1), "download_dir": str(downloads),
         "bind_host": "127.0.0.1", "azuracast_enabled": "1",
     })

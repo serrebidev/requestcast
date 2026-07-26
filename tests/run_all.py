@@ -20,6 +20,7 @@ TESTS = (
     "test_deezer_import_match.py",
     "test_first_run.py",
     "test_legacy_env.py",
+    "test_preferences.py",
     "test_quality_preservation.py",
     "test_request_flow.py",
     "test_server_http.py",

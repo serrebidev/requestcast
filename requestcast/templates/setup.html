@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}{% if first_run %}Set up RequestCast{% else %}Settings{% endif %}{% endblock %}
+{% block title %}{% if first_run %}Set up RequestCast{% else %}Preferences{% endif %}{% endblock %}
 {% block content %}
-<h1>{% if first_run %}Set up RequestCast{% else %}Settings{% endif %}</h1>
+<h1>{% if first_run %}Set up RequestCast{% else %}Preferences{% endif %}</h1>
 
 {% if first_run %}
 <p>Choose a download folder. Everything else is optional.</p>
@@ -23,7 +23,7 @@
 </section>
 {% endif %}
 
-<form method="post" action="{{ url_for('setup') }}" class="search-form">
+<form method="post" action="{{ url_for(form_endpoint) }}" class="search-form">
   {% if not first_run %}<input type="hidden" name="csrf" value="{{ csrf_token() }}">{% endif %}
 
   <h2>Downloads</h2>
@@ -75,8 +75,8 @@
 
   <h2>Access</h2>
   <label for="password">{% if first_run %}Password{% else %}New password{% endif %}</label>
-  <input id="password" name="password" type="password" autocomplete="new-password">
-  <p class="hint">Required for network access. Optional on 127.0.0.1.
+  <input id="password" name="password" type="password" {% if first_run %}required{% endif %} autocomplete="new-password">
+  <p class="hint">{% if first_run %}Required.{% else %}Required for network access. Optional on 127.0.0.1.{% endif %}
     {% if not first_run %}Leave blank to keep the current password.{% endif %}</p>
 
   {% if not first_run %}
@@ -85,6 +85,11 @@
     Remove the password (only allowed when listening on 127.0.0.1)
   </label>
   {% endif %}
+
+  <label for="admin_password">{% if first_run %}Admin password{% else %}New admin password{% endif %}</label>
+  <input id="admin_password" name="admin_password" type="password"
+         {% if first_run %}required{% endif %} autocomplete="new-password">
+  <p class="hint">Protects Preferences. {% if not first_run %}Leave blank to keep it.{% endif %}</p>
 
   <label for="bind_host">Listen on address</label>
   <input id="bind_host" name="bind_host" type="text" value="{{ settings.bind_host }}"
@@ -96,7 +101,7 @@
          inputmode="numeric">
   <p class="hint">Address and port changes require a restart.</p>
 
-  <button type="submit">{% if first_run %}Save and start{% else %}Save settings{% endif %}</button>
+  <button type="submit">{% if first_run %}Save and start{% else %}Save preferences{% endif %}</button>
 </form>
 
 <p class="hint">Settings are stored in {{ config_path }}.</p>

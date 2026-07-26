@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{% if setting_admin_password %}Set admin password{% else %}Admin login{% endif %} — RequestCast{% endblock %}
+{% block content %}
+<section class="narrow" aria-labelledby="admin-login-heading">
+  <h1 id="admin-login-heading">{% if setting_admin_password %}Set admin password{% else %}Admin login{% endif %}</h1>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <form method="post">
+    <input type="hidden" name="next" value="{{ next or request.args.get('next', '') }}">
+    {% if setting_admin_password %}<input type="hidden" name="csrf" value="{{ csrf_token() }}">{% endif %}
+    <label for="password">{% if setting_admin_password %}New admin password{% else %}Admin password{% endif %}</label>
+    <input id="password" name="password" type="password" required autofocus
+           autocomplete="{% if setting_admin_password %}new-password{% else %}current-password{% endif %}">
+    <button type="submit">{% if setting_admin_password %}Save password{% else %}Continue{% endif %}</button>
+  </form>
+</section>
+{% endblock %}
