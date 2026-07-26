@@ -4,24 +4,21 @@
 <h1>{% if first_run %}Set up RequestCast{% else %}Settings{% endif %}</h1>
 
 {% if first_run %}
-<p>RequestCast has not been configured yet. Tell it where to save music. Everything else is
-optional: without an AzuraCast connection it works as a plain music downloader.</p>
+<p>Choose a download folder. Everything else is optional.</p>
 {% endif %}
 
 {% if missing_tools %}
 <section aria-labelledby="tools-heading">
   <h2 id="tools-heading">Download tools</h2>
-  <p>These programs are needed before anything can be downloaded, and are missing:
-    {{ missing_tools | join(', ') }}.</p>
+  <p>Required for downloads. Missing: {{ missing_tools | join(', ') }}.</p>
   {% if can_auto_install %}
   <form method="post" action="{{ url_for('setup_tools') }}">
     {% if not first_run %}<input type="hidden" name="csrf" value="{{ csrf_token() }}">{% endif %}
-    <button type="submit">Download and install them now</button>
+    <button type="submit">Install tools</button>
   </form>
   <p class="hint">They are saved in a <code>tools</code> folder next to the program. About 80 MB.</p>
   {% else %}
-  <p>Install them with your package manager, for example <code>apt install ffmpeg</code> and
-    <code>pip install yt-dlp</code>, then reload this page.</p>
+  <p>Install <code>ffmpeg</code> and <code>yt-dlp</code>, then reload.</p>
   {% endif %}
 </section>
 {% endif %}
@@ -29,15 +26,14 @@ optional: without an AzuraCast connection it works as a plain music downloader.<
 <form method="post" action="{{ url_for('setup') }}" class="search-form">
   {% if not first_run %}<input type="hidden" name="csrf" value="{{ csrf_token() }}">{% endif %}
 
-  <h2>Where music is saved</h2>
+  <h2>Downloads</h2>
   <label for="download_dir">Download folder</label>
   <input id="download_dir" name="download_dir" type="text" required
          value="{{ settings.download_dir }}" autocomplete="off" spellcheck="false">
-  <p class="hint">Finished audio is saved here. With AzuraCast turned on, this is only used
-    for temporary files.</p>
+  <p class="hint">Final files go here. With AzuraCast enabled, this is temporary storage.</p>
 
   <h2>AzuraCast</h2>
-  <p>Leave this off to use RequestCast as a local downloader.</p>
+  <p>Turn this on only to upload finished files to AzuraCast.</p>
   <label for="azuracast_enabled">
     <input id="azuracast_enabled" name="azuracast_enabled" type="checkbox" value="1"
            {% if settings.azuracast_enabled %}checked{% endif %}>
@@ -65,8 +61,7 @@ optional: without an AzuraCast connection it works as a plain music downloader.<
   <label for="azuracast_request_playlist_id">Request playlist ID (optional)</label>
   <input id="azuracast_request_playlist_id" name="azuracast_request_playlist_id" type="text"
          value="{{ settings.azuracast_request_playlist_id }}" inputmode="numeric">
-  <p class="hint">Uploads are added to this playlist so listeners can request them. Leave empty
-    to skip that step.</p>
+  <p class="hint">Adds uploads to this request playlist. Leave blank to skip.</p>
 
   <label for="azuracast_media_dir">Station media folder on this machine (optional)</label>
   <input id="azuracast_media_dir" name="azuracast_media_dir" type="text"
@@ -76,15 +71,13 @@ optional: without an AzuraCast connection it works as a plain music downloader.<
   <label for="deezer_arl">Deezer ARL cookie (optional)</label>
   <input id="deezer_arl" name="deezer_arl" type="password"
          value="{{ settings.deezer_arl }}" autocomplete="off">
-  <p class="hint">With a subscriber ARL, downloads come from Deezer first — FLAC, or
-    320 kbps MP3 when FLAC is not offered — and YouTube is only the fallback. The ARL is
-    stored only in the settings file on this machine.</p>
+  <p class="hint">Uses Deezer first: FLAC, then MP3. Falls back to YouTube. Stored locally.</p>
 
   <h2>Access</h2>
   <label for="password">{% if first_run %}Password{% else %}New password{% endif %}</label>
   <input id="password" name="password" type="password" autocomplete="new-password">
-  <p class="hint">A password is required unless the program only listens on 127.0.0.1.
-    {% if not first_run %}Leave empty to keep the current password.{% endif %}</p>
+  <p class="hint">Required for network access. Optional on 127.0.0.1.
+    {% if not first_run %}Leave blank to keep the current password.{% endif %}</p>
 
   {% if not first_run %}
   <label for="clear_password">
@@ -96,12 +89,12 @@ optional: without an AzuraCast connection it works as a plain music downloader.<
   <label for="bind_host">Listen on address</label>
   <input id="bind_host" name="bind_host" type="text" value="{{ settings.bind_host }}"
          autocomplete="off" spellcheck="false">
-  <p class="hint">Use 127.0.0.1 for this computer only, or 0.0.0.0 to allow other machines.</p>
+  <p class="hint">127.0.0.1 is local only. 0.0.0.0 allows other machines.</p>
 
   <label for="bind_port">Listen on port</label>
   <input id="bind_port" name="bind_port" type="text" value="{{ settings.bind_port }}"
          inputmode="numeric">
-  <p class="hint">Changes to the address or port take effect the next time the program starts.</p>
+  <p class="hint">Address and port changes require a restart.</p>
 
   <button type="submit">{% if first_run %}Save and start{% else %}Save settings{% endif %}</button>
 </form>

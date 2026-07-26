@@ -10,7 +10,7 @@
     <dt>Current activity</dt><dd>{{ job['detail'] }}</dd>
   </dl>
   {% if job['error'] %}<h3>Problems</h3><pre class="error">{{ job['error'] }}</pre>{% endif %}
-  {% if job['state'] in ['queued','running'] %}<p>This page does not auto-refresh so it will not interrupt a screen reader.</p>{% endif %}
+  {% if job['state'] in ['queued','running'] %}<p>Select Refresh status for updates.</p>{% endif %}
   <p><a class="button" href="{{ url_for('job_status', job_id=job['id']) }}">Refresh status</a> <a href="{{ url_for('index') }}">Return to search</a></p>
 </section>
 {% endblock %}

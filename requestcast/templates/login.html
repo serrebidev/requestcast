@@ -3,7 +3,6 @@
 {% block content %}
 <section class="narrow" aria-labelledby="login-heading">
   <h1 id="login-heading">Log in</h1>
-  <p>Enter the shared password to search for and add request-only music.</p>
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
   <form method="post">
     <input type="hidden" name="next" value="{{ next or request.args.get('next', '') }}">
