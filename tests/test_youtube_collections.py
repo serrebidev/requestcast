@@ -9,7 +9,9 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-with tempfile.TemporaryDirectory(prefix="requestcast-youtube-collections-") as temp_name:
+with tempfile.TemporaryDirectory(
+    prefix="requestcast-youtube-collections-", ignore_cleanup_errors=True
+) as temp_name:
     temp = Path(temp_name)
     os.environ["REQUESTCAST_CONFIG"] = str(temp / "config.json")
     os.environ["REQUESTCAST_DISABLE_WORKER"] = "1"
