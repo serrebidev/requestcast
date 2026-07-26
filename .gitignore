@@ -11,3 +11,5 @@ state/
 Downloads/
 .env
 *.log
+
+RequestCast-v*-windows-x64*.zip
