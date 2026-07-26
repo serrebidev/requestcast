@@ -1,4 +1,4 @@
 """RequestCast: search, download, tag, and file music into a request library."""
 
 __version__ = "1.3.0"
-# This version file intentionally triggers verified Windows release builds.
+# This version file triggers verified and diagnosable Windows release builds.
