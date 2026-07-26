@@ -16,11 +16,15 @@ a:focus, button:focus, input:focus, select:focus, summary:focus { outline: 3px s
 .skip-link { background: #fff; color: #000; left: .5rem; padding: .5rem; position: absolute; top: -4rem; z-index: 10; }
 .skip-link:focus { top: .5rem; }
 label { display: block; font-weight: 700; margin-top: .75rem; }
-input, select, button, .button { border: 2px solid #72849b; border-radius: .35rem; font: inherit; padding: .65rem .8rem; }
-input, select { background: #0d1117; color: #fff; width: 100%; }
+input:not([type="checkbox"]), select, button, .button { border: 2px solid #72849b; border-radius: .35rem; font: inherit; padding: .65rem .8rem; }
+input:not([type="checkbox"]), select { background: #0d1117; color: #fff; width: 100%; }
+input[type="checkbox"] { height: 1.25rem; margin: 0 .5rem 0 0; vertical-align: middle; width: 1.25rem; }
 button, .button { background: #1769aa; border-color: #62a7df; color: #fff; cursor: pointer; display: inline-block; font-weight: 700; margin-top: .8rem; text-decoration: none; }
 button.secondary { background: #303c4b; margin: 0; }
 .search-form, .narrow { background: #18212c; border: 1px solid #405168; border-radius: .5rem; max-width: 48rem; padding: 1rem; }
+.search-form h2 { border-top: 1px solid #405168; margin-top: 1.75rem; padding-top: 1.25rem; }
+.search-form h2:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.hint { color: #d3dce8; max-width: 68ch; }
 .field-row { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
 .results { list-style-position: inside; padding: 0; }
 .result { border-top: 1px solid #405168; clear: both; padding: 1rem 0 1.5rem; }

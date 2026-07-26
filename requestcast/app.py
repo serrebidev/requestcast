@@ -224,7 +224,7 @@ def require_csrf() -> None:
 
 @app.before_request
 def require_login() -> Any:
-    if request.endpoint in {"healthz", "static"}:
+    if request.endpoint in {"healthz", "static", "stylesheet"}:
         return None
     # Until setup is finished the only thing the program can usefully show is setup.
     if not config.is_configured(SETTINGS):
@@ -259,7 +259,7 @@ def security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    if request.endpoint != "static":
+    if request.endpoint not in {"static", "stylesheet"}:
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -272,6 +272,16 @@ def template_helpers() -> dict[str, Any]:
 @app.route("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.route("/assets/style.css")
+def stylesheet():
+    """Serve the small stylesheet without Waitress's Windows file-wrapper path."""
+    css_path = Path(app.static_folder or "") / "style.css"
+    css = css_path.read_text(encoding="utf-8")
+    response = app.response_class(css, mimetype="text/css")
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.route("/login", methods=["GET", "POST"])
