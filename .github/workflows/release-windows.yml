@@ -117,7 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Fixes the Windows browser not opening automatically. RequestCast now waits until the local web server is accepting connections, then opens http://127.0.0.1:8797/ through the Windows default-browser handler with multiple fallbacks. Both localhost and 127.0.0.1 remain available. Also includes the loopback and Requests dependency fixes from 1.3.2."
+          $notes = "Reworks Windows startup instead of merely handing a URL to the shell. RequestCast now starts Waitress on a dedicated server thread, verifies the real /healthz endpoint, launches the registered browser executable directly from the main thread, and falls back through Windows shell handlers. It also detects an already-running RequestCast instance, creates an Open RequestCast.url shortcut, writes requestcast-startup.log, and guarantees an IPv4 listener even when an older configuration uses an IPv6 wildcard bind."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
