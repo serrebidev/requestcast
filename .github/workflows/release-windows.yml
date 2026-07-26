@@ -78,8 +78,23 @@ jobs:
         env:
           REQUESTCAST_DISABLE_WORKER: '1'
         run: |
-          python -m compileall -q requestcast tests
-          python tests/test_youtube_collections.py
+          $log = "release-windows-test.log"
+          python -m compileall -q requestcast tests *> $log
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -eq 0) {
+            python tests/test_youtube_collections.py *>> $log
+            $exitCode = $LASTEXITCODE
+          }
+          Get-Content $log
+          if ($exitCode -ne 0) {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add $log
+            git commit -m "Record Windows release test failure"
+            git push origin HEAD:main
+            exit $exitCode
+          }
+          Remove-Item $log
 
       - name: Build and test portable executable
         shell: pwsh
