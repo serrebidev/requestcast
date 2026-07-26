@@ -25,7 +25,17 @@ def main() -> int:
 
     from waitress import serve
 
-    serve(app, host=host, port=port, threads=6, channel_timeout=300)
+    # Waitress's one-byte default can leave small response bodies buffered on
+    # Windows after the headers have already been sent.  A larger threshold
+    # lets the request finish before the channel flushes the complete response.
+    serve(
+        app,
+        host=host,
+        port=port,
+        threads=6,
+        channel_timeout=300,
+        send_bytes=18_000,
+    )
     return 0
 
 

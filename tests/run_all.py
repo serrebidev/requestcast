@@ -22,6 +22,7 @@ TESTS = (
     "test_legacy_env.py",
     "test_quality_preservation.py",
     "test_request_flow.py",
+    "test_server_http.py",
     "test_upload_route.py",
     "test_url_input.py",
 )
