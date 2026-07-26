@@ -1977,6 +1977,13 @@ def setup_tools():
     return redirect(url_for("setup" if not config.is_configured(SETTINGS) else "preferences"))
 
 
+# Keep direct playlist and channel URL support active for every entry point,
+# including run.py, Waitress, Gunicorn, and Flask's application loader.
+from .youtube_collections import install as _install_youtube_collection_support
+
+_install_youtube_collection_support()
+
+
 apply_settings()
 
 worker = None
