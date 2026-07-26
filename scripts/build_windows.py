@@ -93,7 +93,21 @@ def main() -> int:
         cwd=target,
         check=False,
         timeout=60,
+        capture_output=True,
+        text=True,
     )
+    if smoke_test.stdout:
+        print(smoke_test.stdout, end="")
+    if smoke_test.stderr:
+        print(smoke_test.stderr, end="", file=sys.stderr)
+
+    smoke_output = f"{smoke_test.stdout}\n{smoke_test.stderr}"
+    if "RequestsDependencyWarning" in smoke_output:
+        print(
+            "The packaged executable emitted a Requests dependency warning.",
+            file=sys.stderr,
+        )
+        return 1
     if smoke_test.returncode != 0:
         print("The packaged executable failed its import smoke test.", file=sys.stderr)
         return smoke_test.returncode or 1
