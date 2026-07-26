@@ -34,36 +34,75 @@ def main() -> int:
 
     separator = ";"
     command = [
-        sys.executable, "-m", "PyInstaller",
+        sys.executable,
+        "-m",
+        "PyInstaller",
         "--noconfirm",
-        "--name", NAME,
-        # A folder build starts much faster than one-file and keeps the
-        # tools folder and settings visibly beside the program.
+        "--clean",
+        "--name",
+        NAME,
         "--onedir",
         "--console",
-        "--add-data", f"{ROOT / 'requestcast' / 'templates'}{separator}requestcast/templates",
-        "--add-data", f"{ROOT / 'requestcast' / 'static'}{separator}requestcast/static",
-        # Imported lazily by their libraries, so PyInstaller cannot see them.
-        "--hidden-import", "waitress",
-        "--hidden-import", "openpyxl",
-        "--hidden-import", "pypdf",
-        # Deezer streams use PyCryptodome's Blowfish implementation.
-        "--hidden-import", "Crypto.Cipher.Blowfish",
-        "--collect-all", "ytmusicapi",
-        "--exclude-module", "tkinter",
-        "--exclude-module", "pytest",
+        "--add-data",
+        f"{ROOT / 'requestcast' / 'templates'}{separator}requestcast/templates",
+        "--add-data",
+        f"{ROOT / 'requestcast' / 'static'}{separator}requestcast/static",
+        "--hidden-import",
+        "waitress",
+        "--hidden-import",
+        "openpyxl",
+        "--hidden-import",
+        "pypdf",
+        "--hidden-import",
+        "Crypto.Cipher.Blowfish",
+        "--collect-all",
+        "ytmusicapi",
+        "--exclude-module",
+        "tkinter",
+        "--exclude-module",
+        "pytest",
+        # RequestCast does not use NumPy. OpenPyXL treats it as optional, but
+        # an incompatible NumPy copy in the build environment can otherwise be
+        # collected and crash the executable before RequestCast starts.
+        "--exclude-module",
+        "numpy",
         str(ROOT / "run.py"),
     ]
-    print(" ".join(command))
+    print(subprocess.list2cmdline(command))
     result = subprocess.run(command, cwd=ROOT, check=False)
     if result.returncode != 0:
         return result.returncode
 
     target = ROOT / "dist" / NAME
+
+    bundled_numpy = [
+        path
+        for path in target.rglob("*")
+        if path.name.lower() == "numpy"
+        or path.name.lower().startswith("numpy.")
+        or "numpy" in {part.lower() for part in path.parts}
+    ]
+    if bundled_numpy:
+        print("The build unexpectedly contains NumPy:", file=sys.stderr)
+        for path in bundled_numpy:
+            print(f"  {path.relative_to(target)}", file=sys.stderr)
+        return 1
+
+    smoke_test = subprocess.run(
+        [str(target / f"{NAME}.exe"), "--check-imports"],
+        cwd=target,
+        check=False,
+        timeout=60,
+    )
+    if smoke_test.returncode != 0:
+        print("The packaged executable failed its import smoke test.", file=sys.stderr)
+        return smoke_test.returncode or 1
+
     for extra in ("README.md", "LICENSE"):
         source = ROOT / extra
         if source.exists():
             shutil.copy2(source, target / extra)
+
     print(f"\nBuilt {target}")
     print(f"Run {target / (NAME + '.exe')} and the setup page opens in your browser.")
     return 0
