@@ -2,19 +2,103 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
+import socket
 import sys
 import threading
 import traceback
+from typing import Any, Callable
 
 from requestcast import browser_shell, config, diagnostics, server
 
 
-# Waitress deprecated this adjustment and has defaulted it to 1 since 1.3.
-# A larger value buffers small pages inside Waitress. RequestCast's setup page
-# is only about 4 KB, so the old 18,000-byte override caused browsers and curl
-# to wait forever even though Flask had already generated the complete response.
-WAITRESS_SEND_BYTES = 1
+class HttpServerController:
+    """Small common interface for the Windows and non-Windows HTTP servers."""
+
+    def __init__(
+        self,
+        backend: str,
+        run: Callable[[], None],
+        close: Callable[[], None],
+    ) -> None:
+        self.backend = backend
+        self.run = run
+        self.close = close
+
+
+def selected_http_backend() -> str:
+    """Use Werkzeug on Windows, where Waitress stalled before sending response bodies."""
+    return "werkzeug-threaded" if os.name == "nt" else "waitress"
+
+
+def tcp_port_is_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Detect an existing listener even when its HTTP response body is stuck."""
+    connect_host = "127.0.0.1" if server.is_loopback_host(host) or server.is_wildcard_host(host) else host
+    try:
+        connection = socket.create_connection((connect_host, port), timeout=max(timeout, 0.1))
+    except OSError:
+        return False
+    try:
+        return True
+    finally:
+        connection.close()
+
+
+def show_startup_error(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+    server.log_startup(message)
+    if os.name == "nt":
+        try:
+            ctypes.windll.user32.MessageBoxW(None, message, "RequestCast", 0x10)
+        except (AttributeError, OSError):
+            pass
+
+
+def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
+    """Create the dependable platform-specific HTTP server."""
+    if os.name == "nt":
+        from werkzeug.serving import make_server
+
+        if server.is_loopback_host(host):
+            bind_host = "127.0.0.1"
+        elif server.is_wildcard_host(host):
+            bind_host = "0.0.0.0"
+        else:
+            bind_host = host
+
+        instance = make_server(bind_host, port, app, threaded=True)
+
+        def close_werkzeug() -> None:
+            instance.shutdown()
+            instance.server_close()
+
+        server.log_startup(
+            f"Windows HTTP backend selected: Werkzeug threaded server; bind={bind_host}:{port}"
+        )
+        return HttpServerController(
+            "werkzeug-threaded",
+            instance.serve_forever,
+            close_werkzeug,
+        )
+
+    from waitress import create_server
+
+    bind_error: BaseException | None = None
+    for bind_options in server.waitress_bind_candidates(host, port):
+        try:
+            instance = create_server(
+                app,
+                threads=6,
+                channel_timeout=300,
+                **bind_options,
+            )
+            server.log_startup(f"Waitress bind selected: {bind_options}")
+            return HttpServerController("waitress", instance.run, instance.close)
+        except BaseException as exc:
+            bind_error = exc
+            server.log_startup(f"Waitress bind failed {bind_options}: {exc!r}")
+    raise RuntimeError(f"Waitress could not bind: {bind_error}")
 
 
 def main() -> int:
@@ -22,6 +106,7 @@ def main() -> int:
         import openpyxl  # noqa: F401
         import pypdf  # noqa: F401
         import waitress  # noqa: F401
+        import werkzeug.serving  # noqa: F401
 
         print("Packaged imports succeeded.")
         return 0
@@ -37,8 +122,13 @@ def main() -> int:
     urls = server.browser_urls(host, port)
     launch_url = server.preferred_browser_url(host, port)
 
-    if diagnostic_only and server.requestcast_is_reachable(launch_url, timeout=1.0):
-        print("Collecting diagnostics from the running RequestCast server.", flush=True)
+    port_open = tcp_port_is_open(host, port, timeout=0.5)
+    if diagnostic_only and port_open:
+        print(
+            "A process is already listening on the RequestCast port. "
+            "Collecting diagnostics without starting a second server.",
+            flush=True,
+        )
         diagnostics.collect_bundle(urls, duration=20.0, show_dialog=True)
         return 0
 
@@ -56,43 +146,33 @@ def main() -> int:
     print("RequestCast web interface:")
     for url in urls:
         print(f"  {url}")
+    print(f"HTTP backend: {selected_http_backend()}")
     print(f"Startup diagnostics: {server.startup_log_path()}")
     print(f"HTTP request log: {diagnostics.http_log_path()}")
     if diagnostics_enabled:
         print(f"Full diagnostic ZIP: {diagnostics.diagnostics_zip_path()}")
 
-    if server.requestcast_is_reachable(launch_url, timeout=0.75):
-        print("RequestCast is already running. Opening the existing web interface.")
-        if "--no-browser" not in sys.argv:
-            browser_shell.launch_browser_when_ready(launch_url, timeout=2.0)
-        if diagnostics_enabled:
-            diagnostics.collect_bundle(urls, duration=10.0, show_dialog=False)
-        return 0
+    if port_open:
+        if server.requestcast_is_reachable(launch_url, timeout=1.5):
+            print("RequestCast is already running. Opening the existing web interface.")
+            if "--no-browser" not in sys.argv:
+                browser_shell.launch_browser_when_ready(launch_url, timeout=2.0)
+            if diagnostics_enabled:
+                diagnostics.collect_bundle(urls, duration=10.0, show_dialog=False)
+            return 0
 
-    from waitress import create_server
+        show_startup_error(
+            f"Port {port} is already held by a process that accepts connections but does not "
+            "complete RequestCast HTTP responses. Close every RequestCast.exe process in Task "
+            "Manager, then start this copy again. RequestCast will not start a second server on "
+            "the same port."
+        )
+        return 1
 
-    http_server = None
-    bind_error: BaseException | None = None
-    for bind_options in server.waitress_bind_candidates(host, port):
-        try:
-            http_server = create_server(
-                app,
-                threads=6,
-                channel_timeout=300,
-                send_bytes=WAITRESS_SEND_BYTES,
-                **bind_options,
-            )
-            server.log_startup(
-                f"Waitress bind selected: {bind_options}; send_bytes={WAITRESS_SEND_BYTES}"
-            )
-            break
-        except BaseException as exc:
-            bind_error = exc
-            server.log_startup(f"Waitress bind failed {bind_options}: {exc!r}")
-
-    if http_server is None:
-        print(f"RequestCast could not start its web server: {bind_error}", file=sys.stderr)
-        print(f"See {server.startup_log_path()} for startup details.", file=sys.stderr)
+    try:
+        http_server = create_http_server(app, host, port)
+    except BaseException as exc:
+        show_startup_error(f"RequestCast could not start its web server: {exc}")
         if diagnostics_enabled:
             diagnostics.collect_bundle(urls, duration=0.0, show_dialog=True)
         return 1
@@ -104,13 +184,22 @@ def main() -> int:
             http_server.run()
         except BaseException as exc:
             server_errors.append(exc)
-            server.log_startup("Waitress stopped with an error:\n" + traceback.format_exc())
+            server.log_startup(
+                f"{http_server.backend} stopped with an error:\n" + traceback.format_exc()
+            )
 
-    server_thread = threading.Thread(target=run_server, name="requestcast-web-server", daemon=False)
+    server_thread = threading.Thread(
+        target=run_server,
+        name="requestcast-web-server",
+        daemon=False,
+    )
     server_thread.start()
 
     if diagnostic_only:
-        print("A temporary RequestCast server was started for full diagnostics.", flush=True)
+        print(
+            f"A temporary RequestCast {http_server.backend} server was started for diagnostics.",
+            flush=True,
+        )
         diagnostics.collect_bundle(urls, duration=20.0, show_dialog=True)
         http_server.close()
         server_thread.join(timeout=5)
@@ -133,12 +222,13 @@ def main() -> int:
         server_thread.join(timeout=5)
 
     if server_errors:
-        print(f"RequestCast's web server stopped: {server_errors[0]}", file=sys.stderr)
-        print(f"See {server.startup_log_path()} for startup details.", file=sys.stderr)
+        show_startup_error(f"RequestCast's web server stopped: {server_errors[0]}")
         if diagnostics_enabled:
             diagnostics.collect_bundle(urls, duration=0.0, show_dialog=True)
         return 1
-    server.log_startup("RequestCast server thread ended without a recorded exception.")
+    server.log_startup(
+        f"RequestCast {http_server.backend} server thread ended without a recorded exception."
+    )
     return 0
 
 
