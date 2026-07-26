@@ -117,7 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Fixes browser startup for Microsoft Store and MSIX browsers such as Firefox Nightly. RequestCast no longer launches the browser executable path found in the registry, which could start Firefox without opening the RequestCast page. It now waits for the verified /healthz endpoint and asks Windows to open http://127.0.0.1:8797/ through the registered HTTP URL association, with ShellExecuteW, FileProtocolHandler, Internet shortcut, and Explorer fallbacks."
+          $notes = "Fixes cases where /healthz worked but no browser could display RequestCast. Startup now follows the real root-page redirect and verifies RequestCast HTML instead of testing only the health endpoint. On Windows it opens a separate Edge, Chrome, Brave, or Vivaldi profile with proxies, extensions, and automatic HTTPS upgrades disabled, avoiding Store-browser loopback restrictions and forced proxy settings. The startup log now records the complete real-page probe and the exact clean browser executable used."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
