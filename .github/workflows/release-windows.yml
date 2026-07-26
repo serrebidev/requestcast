@@ -77,7 +77,7 @@ jobs:
           "RELEASE_TITLE=RequestCast $version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RELEASE_ZIP=RequestCast-$tag-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Test playlist and channel URLs
+      - name: Test local web access and YouTube collections
         shell: pwsh
         env:
           REQUESTCAST_DISABLE_WORKER: '1'
@@ -85,6 +85,10 @@ jobs:
           $log = "release-windows-test-output.txt"
           python -m compileall -q requestcast tests *> $log
           $exitCode = $LASTEXITCODE
+          if ($exitCode -eq 0) {
+            python tests/test_loopback_access.py *>> $log
+            $exitCode = $LASTEXITCODE
+          }
           if ($exitCode -eq 0) {
             python tests/test_youtube_collections.py *>> $log
             $exitCode = $LASTEXITCODE
@@ -113,7 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Fixes the RequestsDependencyWarning shown at startup by upgrading Requests and pinning compatible urllib3, charset-normalizer, and chardet versions. The Windows build now fails automatically if this dependency warning returns."
+          $notes = "Restores Windows web interface access through both http://localhost:8797/ and http://127.0.0.1:8797/. Loopback mode now listens on IPv4 and IPv6 when available, and older settings can no longer force Secure session cookies over plain local HTTP. Also includes the Requests dependency warning fix from 1.3.1."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
