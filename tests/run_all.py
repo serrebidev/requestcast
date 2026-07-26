@@ -26,6 +26,7 @@ TESTS = (
     "test_server_http.py",
     "test_upload_route.py",
     "test_url_input.py",
+    "test_youtube_collections.py",
 )
 
 
