@@ -117,8 +117,32 @@ def main() -> int:
         if source.exists():
             shutil.copy2(source, target / extra)
 
+    diagnostic_launcher = target / "Collect RequestCast Diagnostics.cmd"
+    diagnostic_launcher.write_text(
+        "@echo off\r\n"
+        "cd /d \"%~dp0\"\r\n"
+        "echo RequestCast will collect detailed diagnostics and create RequestCast-Diagnostics.zip.\r\n"
+        "echo The collector may take one or two minutes.\r\n"
+        "echo.\r\n"
+        "RequestCast.exe --diagnose\r\n"
+        "echo.\r\n"
+        "echo Send the RequestCast-Diagnostics.zip file from this folder.\r\n"
+        "pause\r\n",
+        encoding="utf-8",
+    )
+    diagnostic_readme = target / "DIAGNOSTICS.txt"
+    diagnostic_readme.write_text(
+        "RequestCast automatically creates RequestCast-Diagnostics.zip after startup.\n\n"
+        "To collect a new bundle manually, run Collect RequestCast Diagnostics.cmd. "
+        "The collector starts a temporary local server when RequestCast is not already running.\n\n"
+        "Send the complete ZIP file. It excludes passwords, hashes, salts, API keys, session secrets, "
+        "cookies, form contents, and Deezer ARL values.\n",
+        encoding="utf-8",
+    )
+
     print(f"\nBuilt {target}")
     print(f"Run {target / (NAME + '.exe')} and the setup page opens in your browser.")
+    print(f"Run {diagnostic_launcher} to create a full support ZIP.")
     return 0
 
 

@@ -77,7 +77,7 @@ jobs:
           "RELEASE_TITLE=RequestCast $version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RELEASE_ZIP=RequestCast-$tag-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Test local web access and YouTube collections
+      - name: Test web access, diagnostics, and YouTube collections
         shell: pwsh
         env:
           REQUESTCAST_DISABLE_WORKER: '1'
@@ -87,6 +87,10 @@ jobs:
           $exitCode = $LASTEXITCODE
           if ($exitCode -eq 0) {
             python tests/test_loopback_access.py *>> $log
+            $exitCode = $LASTEXITCODE
+          }
+          if ($exitCode -eq 0) {
+            python tests/test_diagnostics.py *>> $log
             $exitCode = $LASTEXITCODE
           }
           if ($exitCode -eq 0) {
@@ -117,7 +121,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Fixes cases where /healthz worked but no browser could display RequestCast. Startup now follows the real root-page redirect and verifies RequestCast HTML instead of testing only the health endpoint. On Windows it opens a separate Edge, Chrome, Brave, or Vivaldi profile with proxies, extensions, and automatic HTTPS upgrades disabled, avoiding Store-browser loopback restrictions and forced proxy settings. The startup log now records the complete real-page probe and the exact clean browser executable used."
+          $notes = "Adds a full Windows diagnostic collector for cases where RequestCast responds internally but no browser can reach it. Every normal startup records request-level traffic and automatically creates RequestCast-Diagnostics.zip. The package also includes Collect RequestCast Diagnostics.cmd for an on-demand test. The ZIP captures repeated Python, curl.exe, PowerShell, socket, listener, proxy, Winsock, route, adapter, firewall, antivirus, AppX browser, process, and event-log evidence. It excludes passwords, hashes, salts, API keys, session secrets, cookies, form contents, and Deezer ARL values."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
