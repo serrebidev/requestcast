@@ -72,6 +72,14 @@ optional: without an AzuraCast connection it works as a plain music downloader.<
   <input id="azuracast_media_dir" name="azuracast_media_dir" type="text"
          value="{{ settings.azuracast_media_dir }}" autocomplete="off" spellcheck="false">
 
+  <h2>Deezer</h2>
+  <label for="deezer_arl">Deezer ARL cookie (optional)</label>
+  <input id="deezer_arl" name="deezer_arl" type="password"
+         value="{{ settings.deezer_arl }}" autocomplete="off">
+  <p class="hint">With a subscriber ARL, downloads come from Deezer first — FLAC, or
+    320 kbps MP3 when FLAC is not offered — and YouTube is only the fallback. The ARL is
+    stored only in the settings file on this machine.</p>
+
   <h2>Access</h2>
   <label for="password">{% if first_run %}Password{% else %}New password{% endif %}</label>
   <input id="password" name="password" type="password" autocomplete="new-password">

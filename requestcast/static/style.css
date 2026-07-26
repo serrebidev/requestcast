@@ -10,6 +10,7 @@ header { background: #18212c; border-bottom: 1px solid #405168; padding: .8rem 1
 .header-row { align-items: center; display: flex; justify-content: space-between; margin: auto; max-width: 76rem; }
 .site-name { font-size: 1.25rem; font-weight: 700; margin: 0; }
 main { margin: auto; max-width: 76rem; padding: 1rem; }
+footer { border-top: 1px solid #405168; margin-top: 2rem; padding: .8rem 1rem; text-align: center; }
 a { color: #8fc7ff; }
 a:focus, button:focus, input:focus, select:focus, summary:focus { outline: 3px solid #ffd75e; outline-offset: 3px; }
 .skip-link { background: #fff; color: #000; left: .5rem; padding: .5rem; position: absolute; top: -4rem; z-index: 10; }

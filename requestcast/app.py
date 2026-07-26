@@ -35,7 +35,7 @@ from pypdf import PdfReader
 from werkzeug.middleware.proxy_fix import ProxyFix
 from ytmusicapi import YTMusic
 
-from . import config, tools
+from . import config, deezer, tools
 
 
 HTTP_TIMEOUT = (10, 30)
@@ -78,6 +78,8 @@ UPLOAD_DIR = config.DEFAULT_UPLOAD_DIRECTORY
 SECRET_KEY = ""
 PASSWORD_SALT = b""
 PASSWORD_HASH = b""
+DEEZER: deezer.DeezerClient | None = None
+DEEZER_ERROR = ""
 signer: URLSafeTimedSerializer | None = None
 
 
@@ -90,6 +92,7 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     global SETTINGS, STATE_DIR, DOWNLOAD_DIR, MEDIA_DIR, DB_PATH, YTDLP, FFMPEG, FFPROBE
     global AZURACAST_ENABLED, AZURACAST_API_BASE, AZURACAST_API_KEY, STATION_ID
     global REQUEST_PLAYLIST_ID, UPLOAD_DIR, SECRET_KEY, PASSWORD_SALT, PASSWORD_HASH, signer
+    global DEEZER, DEEZER_ERROR
 
     SETTINGS = new_settings if new_settings is not None else config.load()
     STATE_DIR = Path(SETTINGS["state_dir"])
@@ -113,6 +116,17 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     SECRET_KEY = str(SETTINGS.get("secret_key", ""))
     PASSWORD_SALT = bytes.fromhex(SETTINGS["password_salt"]) if SETTINGS.get("password_salt") else b""
     PASSWORD_HASH = bytes.fromhex(SETTINGS["password_hash"]) if SETTINGS.get("password_hash") else b""
+
+    # A configured ARL makes Deezer the default audio source. A bad or expired ARL must
+    # never stop the rest of the program, so any failure just means "no Deezer downloads".
+    DEEZER = None
+    DEEZER_ERROR = ""
+    deezer_arl = str(SETTINGS.get("deezer_arl", ""))
+    if deezer_arl:
+        try:
+            DEEZER = deezer.DeezerClient(deezer_arl)
+        except Exception as exc:
+            DEEZER_ERROR = str(exc)
 
     app.secret_key = SECRET_KEY or "setup-mode-only"
     # Secure by default. The portable build turns this off when it saves a loopback
@@ -1594,10 +1608,29 @@ def submit_azuracast_request(unique_id: str, request_ip: str) -> str:
     return str(result.get("message") or "The track was requested successfully.")
 
 
+def deezer_track_id(track: dict[str, Any]) -> str:
+    """The Deezer track ID for this track, looking it up by artist/title if needed."""
+    if track.get("source") == "deezer":
+        direct = str(track.get("source_id") or track.get("id") or "")
+        if direct.isdigit():
+            return direct
+    found = find_deezer_song(str(track.get("artist", "")), str(track.get("title", "")))
+    return str(found.get("id") or "") if found else ""
+
+
+def download_via_deezer(track: dict[str, Any], temp_dir: Path) -> Path:
+    """Fetch the track's audio from Deezer: FLAC, then 320 or 128 kbps MP3."""
+    if DEEZER is None:
+        raise deezer.DeezerError("No Deezer session is configured.")
+    track_id = deezer_track_id(track)
+    if not track_id:
+        raise deezer.DeezerError("This track was not found on Deezer.")
+    downloaded, _quality = DEEZER.download(track_id, temp_dir)
+    return downloaded
+
+
 def download_one(track: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
     video_id = str(track.get("video_id") or "")
-    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
-        raise RuntimeError("The selected result has no valid YouTube audio source.")
     source_id = safe_filename(str(track.get("source_id") or video_id), video_id)
     stem = f"{safe_filename(track.get('artist', 'Unknown Artist'))} - {safe_filename(track.get('title', 'Untitled'))} [{track['source']}-{source_id}]"
     existing_media = find_azuracast_media(track)
@@ -1605,31 +1638,42 @@ def download_one(track: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
         ensure_request_playlist(existing_media)
         existing_path = MEDIA_DIR / Path(str(existing_media["path"])).name
         return "already existed", existing_path, existing_media
-    if not YTDLP:
-        raise RuntimeError(
-            "yt-dlp was not found. Open Settings and install the download tools, "
-            "or put yt-dlp on your PATH."
-        )
     local_path: Path | None = None
     with tempfile.TemporaryDirectory(prefix="requestcast-", dir=STATE_DIR) as temp_name:
         temp_dir = Path(temp_name)
-        command = [
-            YTDLP, "--ignore-config", "--no-plugin-dirs",
-            "--no-playlist", "--no-progress", "--no-warnings", "--socket-timeout", "30",
-            "--retries", "5", "--fragment-retries", "5", "--sleep-requests", "1",
-            "--max-filesize", "500M", "--match-filter", "!is_live & duration < 7200",
-            "-f", "bestaudio/best",
-            "-o", str(temp_dir / "%(id)s.%(ext)s"), f"https://www.youtube.com/watch?v={video_id}",
-        ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=1800, check=False)
-        if result.returncode != 0:
-            error = (result.stderr or result.stdout).strip().splitlines()
-            raise RuntimeError(error[-1] if error else "yt-dlp failed")
-        candidates = [path for path in temp_dir.iterdir() if path.is_file()]
-        if not candidates:
-            raise RuntimeError("yt-dlp completed but did not produce an audio file.")
-        downloaded = max(candidates, key=lambda path: path.stat().st_size)
-        prepared = remux_or_preserve_audio(downloaded, temp_dir)
+        prepared: Path | None = None
+        # A signed-in Deezer account is the default source. Anything it cannot
+        # supply falls through to the YouTube path below.
+        if DEEZER is not None:
+            try:
+                prepared = download_via_deezer(track, temp_dir)
+            except Exception:
+                prepared = None
+        if prepared is None:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+                raise RuntimeError("The selected result has no valid YouTube audio source.")
+            if not YTDLP:
+                raise RuntimeError(
+                    "yt-dlp was not found. Open Settings and install the download tools, "
+                    "or put yt-dlp on your PATH."
+                )
+            command = [
+                YTDLP, "--ignore-config", "--no-plugin-dirs",
+                "--no-playlist", "--no-progress", "--no-warnings", "--socket-timeout", "30",
+                "--retries", "5", "--fragment-retries", "5", "--sleep-requests", "1",
+                "--max-filesize", "500M", "--match-filter", "!is_live & duration < 7200",
+                "-f", "bestaudio/best",
+                "-o", str(temp_dir / "%(id)s.%(ext)s"), f"https://www.youtube.com/watch?v={video_id}",
+            ]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=1800, check=False)
+            if result.returncode != 0:
+                error = (result.stderr or result.stdout).strip().splitlines()
+                raise RuntimeError(error[-1] if error else "yt-dlp failed")
+            candidates = [path for path in temp_dir.iterdir() if path.is_file()]
+            if not candidates:
+                raise RuntimeError("yt-dlp completed but did not produce an audio file.")
+            downloaded = max(candidates, key=lambda path: path.stat().st_size)
+            prepared = remux_or_preserve_audio(downloaded, temp_dir)
         track["artist"] = clean_text(track.get("artist", "")) or "Unknown Artist"
         track["title"] = clean_youtube_title(track.get("title", "")) or "Untitled"
         tag_audio(prepared, track)
@@ -1742,6 +1786,7 @@ def setup():
             "azuracast_upload_dir": request.form.get("azuracast_upload_dir", "").strip() or config.DEFAULT_UPLOAD_DIRECTORY,
             "bind_host": request.form.get("bind_host", "").strip() or config.DEFAULT_BIND_HOST,
             "bind_port": request.form.get("bind_port", "").strip() or config.DEFAULT_BIND_PORT,
+            "deezer_arl": request.form.get("deezer_arl", "").strip(),
         }
         # Serving plain HTTP on this machine means the session cookie cannot be Secure.
         submitted["secure_cookies"] = submitted["bind_host"] not in config.LOOPBACK_HOSTS

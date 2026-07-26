@@ -47,6 +47,8 @@ def main() -> int:
         "--hidden-import", "waitress",
         "--hidden-import", "openpyxl",
         "--hidden-import", "pypdf",
+        # Deezer streams use PyCryptodome's Blowfish implementation.
+        "--hidden-import", "Crypto.Cipher.Blowfish",
         "--collect-all", "ytmusicapi",
         "--exclude-module", "tkinter",
         "--exclude-module", "pytest",

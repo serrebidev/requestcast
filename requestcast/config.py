@@ -48,6 +48,7 @@ FIELDS: dict[str, Any] = {
     "ytdlp_path": "",
     "ffmpeg_path": "",
     "ffprobe_path": "",
+    "deezer_arl": "",
 }
 
 # Environment names are checked in order, so the modern name wins over the legacy one.
@@ -69,6 +70,7 @@ ENVIRONMENT_NAMES: dict[str, tuple[str, ...]] = {
     "ytdlp_path": ("REQUESTCAST_YTDLP", "ADDTO_YTDLP"),
     "ffmpeg_path": ("REQUESTCAST_FFMPEG",),
     "ffprobe_path": ("REQUESTCAST_FFPROBE",),
+    "deezer_arl": ("REQUESTCAST_DEEZER_ARL", "ADDTO_DEEZER_ARL"),
 }
 
 TRUTHY = {"1", "true", "yes", "on"}

@@ -10,6 +10,8 @@ It runs two ways from the same code: a **portable Windows program** you double-c
 
 - Search YouTube and Deezer from one box, or paste a URL to a track, album, playlist, or artist
 - Upload a **TXT, XLSX, or PDF list** of music and it indexes the whole thing, then works through it
+- With a **Deezer subscriber ARL** configured, downloads come from Deezer first — **FLAC**, or
+  **320 kbps MP3** when FLAC is not offered — and YouTube is only the fallback
 - Prefers **Deezer's copy of a track's metadata** when one matches cleanly, so artist, title,
   album, year, and ISRC come out right instead of guessed from a video title
 - Artist-only lines take that artist's **entire catalogue** by default, or a cap you choose
@@ -69,6 +71,7 @@ REQUESTCAST_REQUEST_PLAYLIST_ID=10
 REQUESTCAST_SECRET_KEY=...
 REQUESTCAST_PASSWORD_SALT=...   # 32 bytes, hex
 REQUESTCAST_PASSWORD_HASH=...   # scrypt, hex
+REQUESTCAST_DEEZER_ARL=...      # optional Deezer subscriber ARL
 ```
 
 Setting `REQUESTCAST_AZURACAST_API_KEY` turns the AzuraCast integration on. Serve it with
@@ -79,11 +82,29 @@ gunicorn or waitress behind nginx, and give it a generous request timeout — in
 
 ## Where the audio comes from
 
-Audio is fetched with yt-dlp from YouTube. Deezer is used for **metadata only**, through its
-public API — no account, no ARL, no credentials of any kind. RequestCast does not decrypt
-protected streams and will not be extended to do so.
+With a Deezer subscriber ARL configured (the settings page, or `REQUESTCAST_DEEZER_ARL`),
+audio comes from the Deezer account first: FLAC when the account is offered it, then
+320 kbps MP3, then 128 kbps MP3. Tracks the account cannot supply fall back to YouTube,
+fetched with yt-dlp. Without an ARL, YouTube is the only source and Deezer is used for
+**metadata only**, through its public API.
+
+The ARL is runtime configuration. It lives in the settings file or the environment, and
+must never be committed to the repository.
 
 You are responsible for having the right to download and broadcast whatever you point it at.
+
+## Testing
+
+Run the self-contained test suite from the repository root:
+
+```bash
+python tests/run_all.py
+```
+
+This includes the Deezer quality, decryption, source-preference, YouTube-fallback, setup,
+configuration, import, request, upload, audio-preservation, and URL-input checks. The remaining
+scripts under `tests/` are manual integration checks: they require either the private playlist
+fixtures named in the script or a live RequestCast/AzuraCast deployment.
 
 ## Accessibility
 

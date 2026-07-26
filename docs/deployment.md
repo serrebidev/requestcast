@@ -51,6 +51,10 @@ REQUESTCAST_STATION_ID=1
 REQUESTCAST_REQUEST_PLAYLIST_ID=10
 REQUESTCAST_UPLOAD_DIR=Requests
 REQUESTCAST_MEDIA_DIR=/var/azuracast/media/Requests
+
+# Optional. A Deezer subscriber ARL makes Deezer the default audio source
+# (FLAC, then 320 kbps MP3), with YouTube as the fallback. Keep it secret.
+REQUESTCAST_DEEZER_ARL=...
 ```
 
 Setting `REQUESTCAST_AZURACAST_API_KEY` enables the AzuraCast integration.
