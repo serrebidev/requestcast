@@ -243,7 +243,7 @@ def _safe_headers(headers: list[tuple[str, str]]) -> dict[str, str]:
         "content-type", "content-length", "location", "server", "date", "connection",
         "cache-control", "x-content-type-options", "x-frame-options", "content-security-policy",
     }
-    return {key: value for key, value in headers if key.casefold() in allowed}
+    return {key.casefold(): value for key, value in headers if key.casefold() in allowed}
 
 
 def _body_metadata(body: bytes) -> dict[str, Any]:
@@ -308,7 +308,7 @@ def _http_redirect_chain(url: str, maximum: int = 6) -> list[dict[str, Any]]:
         if not result.get("ok"):
             break
         status = int(result.get("status") or 0)
-        location = str((result.get("headers") or {}).get("Location") or "")
+        location = str((result.get("headers") or {}).get("location") or "")
         if status not in {301, 302, 303, 307, 308} or not location:
             break
         current = urljoin(current, location)
@@ -405,7 +405,7 @@ def _collect_commands(directory: Path, urls: list[str], port: int) -> None:
         if curl:
             _run_command(
                 commands / f"curl-{index}-{safe}.txt",
-                [curl, "-v", "-L", "--noproxy", "*", "--connect-timeout", "5", "--max-time", "15", "-o", "NUL", "-D", "-", "-w", "\nFINAL_URL=%{url_effective}\nHTTP_CODE=%{http_code}\nREMOTE_IP=%{remote_ip}\nREMOTE_PORT=%{remote_port}\nTOTAL_TIME=%{time_total}\n", url],
+                [curl, "-sS", "-L", "--noproxy", "*", "--connect-timeout", "5", "--max-time", "15", "-o", "NUL", "-w", "FINAL_URL=%{url_effective}\nHTTP_CODE=%{http_code}\nREMOTE_IP=%{remote_ip}\nREMOTE_PORT=%{remote_port}\nLOCAL_IP=%{local_ip}\nLOCAL_PORT=%{local_port}\nTOTAL_TIME=%{time_total}\n", url],
                 20,
             )
         escaped = url.replace("'", "''")
@@ -413,9 +413,10 @@ def _collect_commands(directory: Path, urls: list[str], port: int) -> None:
             commands / f"powershell-webrequest-{index}-{safe}.txt",
             "$ProgressPreference='SilentlyContinue'; try { "
             f"$r=Invoke-WebRequest -UseBasicParsing -Uri '{escaped}' -Proxy $null -TimeoutSec 15 -MaximumRedirection 5; "
-            "$r | Select-Object StatusCode,StatusDescription,BaseResponse,Headers,RawContentLength | Format-List *; "
+            "$r | Select-Object StatusCode,StatusDescription,RawContentLength | Format-List *; "
+            "'FINAL_URL=' + $r.BaseResponse.ResponseUri.AbsoluteUri; "
             "'CONTAINS_REQUESTCAST=' + ($r.Content -match 'RequestCast') "
-            "} catch { $_ | Format-List * -Force; exit 1 }",
+            "} catch { $_ | Select-Object Exception,FullyQualifiedErrorId,CategoryInfo | Format-List *; exit 1 }",
             25,
         )
 
