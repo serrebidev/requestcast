@@ -1,0 +1,63 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create or update
+        required: true
+        default: v1.2.1
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build and test portable executable
+        shell: pwsh
+        run: python scripts/build_windows.py
+
+      - name: Create release ZIP
+        shell: pwsh
+        run: |
+          $zip = "RequestCast-${{ inputs.tag }}-windows-x64.zip"
+          Compress-Archive -Path "dist\RequestCast\*" -DestinationPath $zip -Force
+          "RELEASE_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Create or update GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ inputs.tag }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "${{ inputs.tag }}" "$env:RELEASE_ZIP" --clobber
+          }
+          else {
+            gh release create "${{ inputs.tag }}" "$env:RELEASE_ZIP" --target main --title "RequestCast 1.2.1" --notes "Fixes the Windows startup crash caused by an incompatible bundled NumPy dependency."
+          }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RequestCast-${{ inputs.tag }}-windows-x64
+          path: ${{ env.RELEASE_ZIP }}
