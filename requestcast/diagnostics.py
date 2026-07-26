@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -28,9 +29,8 @@ _LOG_LOCK = threading.Lock()
 
 
 def diagnostics_root() -> Path:
-    """Return a writable location visible to the user."""
-    candidates = (config.app_dir(), config.config_path().parent)
-    for candidate in candidates:
+    """Return a writable location that is easy for the user to find."""
+    for candidate in (config.app_dir(), config.config_path().parent, Path.cwd()):
         try:
             candidate.mkdir(parents=True, exist_ok=True)
             probe = candidate / ".requestcast-diagnostics-write-test"
@@ -59,7 +59,7 @@ def _timestamp() -> str:
 
 
 def log_http(message: str) -> None:
-    """Write one request-level event without query strings, cookies, or form data."""
+    """Write a request event without query strings, cookies, or form contents."""
     path = http_log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +70,7 @@ def log_http(message: str) -> None:
 
 
 class RequestLoggingMiddleware:
-    """Record whether requests from browsers and diagnostic tools reach Waitress."""
+    """Record whether browser and diagnostic requests actually reach Waitress."""
 
     def __init__(self, application: Callable[..., Iterable[bytes]]) -> None:
         self.application = application
@@ -96,8 +96,8 @@ class RequestLoggingMiddleware:
             response = self.application(environ, logged_start_response)
         except BaseException:
             log_http(
-                f"REQUEST exception method={method} path={path!r} elapsed_ms="
-                f"{(time.monotonic() - started) * 1000:.1f}\n{traceback.format_exc()}"
+                f"REQUEST exception method={method} path={path!r} "
+                f"elapsed_ms={(time.monotonic() - started) * 1000:.1f}\n{traceback.format_exc()}"
             )
             raise
 
@@ -108,10 +108,7 @@ class RequestLoggingMiddleware:
                     total += len(chunk)
                     yield chunk
             except BaseException:
-                log_http(
-                    f"RESPONSE iteration exception method={method} path={path!r}\n"
-                    f"{traceback.format_exc()}"
-                )
+                log_http(f"RESPONSE iteration exception method={method} path={path!r}\n{traceback.format_exc()}")
                 raise
             finally:
                 close = getattr(response, "close", None)
@@ -137,7 +134,6 @@ def install_exception_hooks() -> None:
         previous_main(exc_type, exc, tb)
 
     sys.excepthook = main_hook
-
     previous_thread = getattr(threading, "excepthook", None)
     if previous_thread is not None:
         def thread_hook(args: Any) -> None:
@@ -150,38 +146,57 @@ def install_exception_hooks() -> None:
         threading.excepthook = thread_hook
 
 
-def _redact_value(key: str, value: Any) -> Any:
+def _is_sensitive_key(key: str) -> bool:
     lowered = key.casefold()
-    if any(word in lowered for word in _SENSITIVE_WORDS):
-        if value in (None, "", False):
-            return value
-        return "[REDACTED]"
-    return value
+    return any(word in lowered for word in _SENSITIVE_WORDS)
 
 
 def sanitized_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    return {key: _redact_value(key, value) for key, value in sorted(settings.items())}
+    output: dict[str, Any] = {}
+    for key, value in sorted(settings.items()):
+        output[key] = "[REDACTED]" if _is_sensitive_key(key) and value not in (None, "", False) else value
+    return output
 
 
 def sanitized_environment() -> dict[str, str]:
-    allowed_prefixes = ("HTTP_", "HTTPS_", "ALL_PROXY", "NO_PROXY", "REQUESTCAST_", "ADDTO_")
+    prefixes = ("HTTP_", "HTTPS_", "ALL_PROXY", "NO_PROXY", "REQUESTCAST_", "ADDTO_")
     output: dict[str, str] = {}
     for key, value in sorted(os.environ.items()):
-        upper = key.upper()
-        if upper.startswith(allowed_prefixes):
-            output[key] = str(_redact_value(key, value))
+        if key.upper().startswith(prefixes):
+            output[key] = "[REDACTED]" if _is_sensitive_key(key) else str(value)
+    return output
+
+
+def _known_secret_values() -> list[str]:
+    values: list[str] = []
+    for key, value in config.load().items():
+        if _is_sensitive_key(key) and isinstance(value, str) and value:
+            values.append(value)
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact_text(text: str) -> str:
+    output = str(text or "")
+    for value in _known_secret_values():
+        output = output.replace(value, "[REDACTED]")
+    output = re.sub(r"(?i)(https?://)([^\s/@:]+):([^\s/@]+)@", r"\1[REDACTED]@", output)
+    output = re.sub(
+        r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|cookie|deezer[_-]?arl)\s*[:=]\s*([^\s;]+)",
+        r"\1=[REDACTED]",
+        output,
+    )
     return output
 
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8", errors="replace")
+    path.write_text(_redact_text(text), encoding="utf-8", errors="replace")
 
 
 def _append(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8", errors="replace") as handle:
-        handle.write(text)
+        handle.write(_redact_text(text))
         handle.flush()
 
 
@@ -215,13 +230,33 @@ def _powershell(path: Path, script: str, timeout: float = 45.0) -> None:
     )
 
 
-def _copy_if_exists(source: Path, destination: Path) -> None:
+def _copy_text_if_exists(source: Path, destination: Path) -> None:
     try:
         if source.is_file():
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            _write(destination, source.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         _write(destination.with_suffix(destination.suffix + ".error.txt"), traceback.format_exc())
+
+
+def _safe_headers(headers: list[tuple[str, str]]) -> dict[str, str]:
+    allowed = {
+        "content-type", "content-length", "location", "server", "date", "connection",
+        "cache-control", "x-content-type-options", "x-frame-options", "content-security-policy",
+    }
+    return {key: value for key, value in headers if key.casefold() in allowed}
+
+
+def _body_metadata(body: bytes) -> dict[str, Any]:
+    decoded = body.decode("utf-8", errors="replace")
+    title_match = re.search(r"(?is)<title[^>]*>(.*?)</title>", decoded)
+    title = re.sub(r"\s+", " ", title_match.group(1)).strip()[:200] if title_match else ""
+    return {
+        "bytes_read": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "contains_requestcast": "requestcast" in decoded.casefold(),
+        "contains_html": "<html" in decoded.casefold(),
+        "title": title,
+    }
 
 
 def _http_request(url: str, *, timeout: float = 4.0) -> dict[str, Any]:
@@ -229,33 +264,24 @@ def _http_request(url: str, *, timeout: float = 4.0) -> dict[str, Any]:
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 80
     path = parsed.path or "/"
-    if parsed.query:
-        path += "?" + parsed.query
     connection = http.client.HTTPConnection(host, port, timeout=timeout)
     started = time.monotonic()
     try:
         connection.request(
             "GET",
             path,
-            headers={
-                "Host": parsed.netloc or host,
-                "User-Agent": "RequestCast-full-diagnostics/1",
-                "Connection": "close",
-            },
+            headers={"Host": parsed.netloc or host, "User-Agent": "RequestCast-full-diagnostics/1", "Connection": "close"},
         )
         response = connection.getresponse()
         body = response.read(65536)
-        headers = {key: value for key, value in response.getheaders()}
         return {
             "ok": True,
             "url": url,
             "status": response.status,
             "reason": response.reason,
             "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
-            "headers": headers,
-            "body_bytes_read": len(body),
-            "body_sha256": hashlib.sha256(body).hexdigest(),
-            "body_preview": body[:4096].decode("utf-8", errors="replace"),
+            "headers": _safe_headers(response.getheaders()),
+            "body": _body_metadata(body),
         }
     except BaseException as exc:
         return {
@@ -273,7 +299,7 @@ def _http_request(url: str, *, timeout: float = 4.0) -> dict[str, Any]:
             pass
 
 
-def _http_redirect_chain(url: str, *, maximum: int = 6) -> list[dict[str, Any]]:
+def _http_redirect_chain(url: str, maximum: int = 6) -> list[dict[str, Any]]:
     chain: list[dict[str, Any]] = []
     current = url
     for _ in range(maximum):
@@ -290,46 +316,30 @@ def _http_redirect_chain(url: str, *, maximum: int = 6) -> list[dict[str, Any]]:
 
 
 def _socket_probe(host: str, port: int) -> dict[str, Any]:
-    started = time.monotonic()
     try:
         addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except BaseException as exc:
         return {"host": host, "port": port, "resolve_error": repr(exc)}
     attempts: list[dict[str, Any]] = []
-    for family, socktype, protocol, canonical, address in addresses:
+    for family, socktype, protocol, _canonical, address in addresses:
         sock = socket.socket(family, socktype, protocol)
         sock.settimeout(3.0)
-        one_started = time.monotonic()
+        started = time.monotonic()
         try:
             sock.connect(address)
-            attempts.append(
-                {
-                    "address": repr(address),
-                    "family": family,
-                    "connected": True,
-                    "local_socket": repr(sock.getsockname()),
-                    "peer_socket": repr(sock.getpeername()),
-                    "elapsed_ms": round((time.monotonic() - one_started) * 1000, 1),
-                }
-            )
+            attempts.append({
+                "address": repr(address), "family": family, "connected": True,
+                "local_socket": repr(sock.getsockname()), "peer_socket": repr(sock.getpeername()),
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            })
         except BaseException as exc:
-            attempts.append(
-                {
-                    "address": repr(address),
-                    "family": family,
-                    "connected": False,
-                    "error": repr(exc),
-                    "elapsed_ms": round((time.monotonic() - one_started) * 1000, 1),
-                }
-            )
+            attempts.append({
+                "address": repr(address), "family": family, "connected": False,
+                "error": repr(exc), "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            })
         finally:
             sock.close()
-    return {
-        "host": host,
-        "port": port,
-        "total_elapsed_ms": round((time.monotonic() - started) * 1000, 1),
-        "attempts": attempts,
-    }
+    return {"host": host, "port": port, "attempts": attempts}
 
 
 def _collect_http_timeline(directory: Path, urls: list[str], duration: float) -> None:
@@ -356,74 +366,38 @@ def _collect_http_timeline(directory: Path, urls: list[str], duration: float) ->
 
 def _collect_commands(directory: Path, urls: list[str], port: int) -> None:
     commands = directory / "commands"
-    _run_command(commands / "whoami.txt", ["whoami.exe", "/all"])
-    _run_command(commands / "systeminfo.txt", ["systeminfo.exe"], timeout=60)
-    _run_command(commands / "ipconfig-all.txt", ["ipconfig.exe", "/all"])
-    _run_command(commands / "route-print.txt", ["route.exe", "print"])
-    _run_command(commands / "arp-a.txt", ["arp.exe", "-a"])
-    _run_command(commands / "netstat-ano.txt", ["netstat.exe", "-ano"])
-    _run_command(commands / "netsh-winhttp-proxy.txt", ["netsh.exe", "winhttp", "show", "proxy"])
-    _run_command(commands / "netsh-winsock-catalog.txt", ["netsh.exe", "winsock", "show", "catalog"], timeout=60)
-    _run_command(commands / "netsh-portproxy.txt", ["netsh.exe", "interface", "portproxy", "show", "all"])
-    _run_command(commands / "netsh-firewall-profiles.txt", ["netsh.exe", "advfirewall", "show", "allprofiles"])
-    _run_command(commands / "loopback-exemptions.txt", ["CheckNetIsolation.exe", "LoopbackExempt", "-s"])
-    _run_command(commands / "tasklist.txt", ["tasklist.exe", "/v"], timeout=60)
-    _run_command(
-        commands / "internet-settings-registry.txt",
-        ["reg.exe", "query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/s"],
-    )
-    _run_command(
-        commands / "edge-policies-registry.txt",
-        ["reg.exe", "query", r"HKLM\Software\Policies\Microsoft\Edge", "/s"],
-    )
-    _run_command(
-        commands / "firefox-policies-registry.txt",
-        ["reg.exe", "query", r"HKLM\Software\Policies\Mozilla\Firefox", "/s"],
-    )
+    basic_commands: list[tuple[str, list[str], float]] = [
+        ("whoami.txt", ["whoami.exe", "/all"], 30),
+        ("systeminfo.txt", ["systeminfo.exe"], 60),
+        ("ipconfig-all.txt", ["ipconfig.exe", "/all"], 30),
+        ("route-print.txt", ["route.exe", "print"], 30),
+        ("arp-a.txt", ["arp.exe", "-a"], 30),
+        ("netstat-ano.txt", ["netstat.exe", "-ano"], 30),
+        ("winhttp-proxy.txt", ["netsh.exe", "winhttp", "show", "proxy"], 30),
+        ("winsock-catalog.txt", ["netsh.exe", "winsock", "show", "catalog"], 60),
+        ("portproxy.txt", ["netsh.exe", "interface", "portproxy", "show", "all"], 30),
+        ("firewall-profiles.txt", ["netsh.exe", "advfirewall", "show", "allprofiles"], 30),
+        ("loopback-exemptions.txt", ["CheckNetIsolation.exe", "LoopbackExempt", "-s"], 30),
+        ("tasklist.txt", ["tasklist.exe"], 30),
+        ("internet-settings.txt", ["reg.exe", "query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/s"], 30),
+        ("edge-policies.txt", ["reg.exe", "query", r"HKLM\Software\Policies\Microsoft\Edge", "/s"], 30),
+        ("firefox-policies.txt", ["reg.exe", "query", r"HKLM\Software\Policies\Mozilla\Firefox", "/s"], 30),
+    ]
+    for filename, command, timeout in basic_commands:
+        _run_command(commands / filename, command, timeout)
 
-    _powershell(
-        commands / "tcp-connections.txt",
-        f"Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {{$_.LocalPort -eq {port} -or $_.RemotePort -eq {port}}} | Format-List *",
-    )
-    _powershell(
-        commands / "network-adapters.txt",
-        "Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Sort-Object Name | Format-List *",
-    )
-    _powershell(
-        commands / "ip-configuration.txt",
-        "Get-NetIPConfiguration -All -Detailed -ErrorAction SilentlyContinue | Format-List *",
-    )
-    _powershell(
-        commands / "relevant-processes.txt",
-        "$names=@('RequestCast.exe','msedge.exe','firefox.exe','chrome.exe','brave.exe','vivaldi.exe'); "
-        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {$names -contains $_.Name} | "
-        "Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate | Format-List *",
-    )
-    _powershell(
-        commands / "firewall-requestcast.txt",
-        "Get-NetFirewallRule -ErrorAction SilentlyContinue | ForEach-Object { $rule=$_; "
-        "$app=$rule | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue; "
-        "if ($rule.DisplayName -match 'RequestCast|Python|Edge|Firefox' -or $app.Program -match 'RequestCast|python|msedge|firefox') "
-        "{[pscustomobject]@{DisplayName=$rule.DisplayName;Enabled=$rule.Enabled;Direction=$rule.Direction;Action=$rule.Action;Profile=$rule.Profile;Program=$app.Program}} } | Format-List *",
-        timeout=90,
-    )
-    _powershell(
-        commands / "appx-browsers.txt",
-        "Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {$_.Name -match 'Firefox|Edge|Chrome|Brave'} | "
-        "Select-Object Name,PackageFullName,InstallLocation,Status | Format-List *",
-    )
-    _powershell(
-        commands / "antivirus-products.txt",
-        "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct -ErrorAction SilentlyContinue | "
-        "Select-Object displayName,pathToSignedProductExe,productState | Format-List *",
-    )
-    _powershell(
-        commands / "recent-application-events.txt",
-        "$since=(Get-Date).AddMinutes(-30); Get-WinEvent -FilterHashtable @{LogName='Application';StartTime=$since} "
-        "-ErrorAction SilentlyContinue | Where-Object {$_.ProviderName -match 'Application Error|Windows Error Reporting|Python|RequestCast'} | "
-        "Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message | Format-List *",
-        timeout=90,
-    )
+    scripts: list[tuple[str, str, float]] = [
+        ("tcp-connections.txt", f"Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {{$_.LocalPort -eq {port} -or $_.RemotePort -eq {port}}} | Format-List *", 45),
+        ("network-adapters.txt", "Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Sort-Object Name | Format-List *", 45),
+        ("ip-configuration.txt", "Get-NetIPConfiguration -All -Detailed -ErrorAction SilentlyContinue | Format-List *", 45),
+        ("relevant-processes.txt", "$names=@('RequestCast.exe','msedge.exe','firefox.exe','chrome.exe','brave.exe','vivaldi.exe'); Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {$names -contains $_.Name} | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate | Format-List *", 45),
+        ("firewall-requestcast.txt", "Get-NetFirewallRule -ErrorAction SilentlyContinue | ForEach-Object { $rule=$_; $app=$rule | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue; if ($rule.DisplayName -match 'RequestCast|Python|Edge|Firefox' -or $app.Program -match 'RequestCast|python|msedge|firefox') {[pscustomobject]@{DisplayName=$rule.DisplayName;Enabled=$rule.Enabled;Direction=$rule.Direction;Action=$rule.Action;Profile=$rule.Profile;Program=$app.Program}} } | Format-List *", 90),
+        ("appx-browsers.txt", "Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {$_.Name -match 'Firefox|Edge|Chrome|Brave'} | Select-Object Name,PackageFullName,InstallLocation,Status | Format-List *", 45),
+        ("antivirus-products.txt", "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct -ErrorAction SilentlyContinue | Select-Object displayName,pathToSignedProductExe,productState | Format-List *", 45),
+        ("recent-application-events.txt", "$since=(Get-Date).AddMinutes(-30); Get-WinEvent -FilterHashtable @{LogName='Application';StartTime=$since} -ErrorAction SilentlyContinue | Where-Object {$_.ProviderName -match 'Application Error|Windows Error Reporting|Python|RequestCast'} | Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message | Format-List *", 90),
+    ]
+    for filename, script, timeout in scripts:
+        _powershell(commands / filename, script, timeout)
 
     for index, url in enumerate(urls, 1):
         safe = "localhost" if "localhost" in url else "127-0-0-1"
@@ -431,8 +405,8 @@ def _collect_commands(directory: Path, urls: list[str], port: int) -> None:
         if curl:
             _run_command(
                 commands / f"curl-{index}-{safe}.txt",
-                [curl, "-v", "-L", "--noproxy", "*", "--connect-timeout", "5", "--max-time", "15", url],
-                timeout=20,
+                [curl, "-v", "-L", "--noproxy", "*", "--connect-timeout", "5", "--max-time", "15", "-o", "NUL", "-D", "-", "-w", "\nFINAL_URL=%{url_effective}\nHTTP_CODE=%{http_code}\nREMOTE_IP=%{remote_ip}\nREMOTE_PORT=%{remote_port}\nTOTAL_TIME=%{time_total}\n", url],
+                20,
             )
         escaped = url.replace("'", "''")
         _powershell(
@@ -440,9 +414,9 @@ def _collect_commands(directory: Path, urls: list[str], port: int) -> None:
             "$ProgressPreference='SilentlyContinue'; try { "
             f"$r=Invoke-WebRequest -UseBasicParsing -Uri '{escaped}' -Proxy $null -TimeoutSec 15 -MaximumRedirection 5; "
             "$r | Select-Object StatusCode,StatusDescription,BaseResponse,Headers,RawContentLength | Format-List *; "
-            "'--- CONTENT PREVIEW ---'; $r.Content.Substring(0,[Math]::Min(4096,$r.Content.Length)) "
+            "'CONTAINS_REQUESTCAST=' + ($r.Content -match 'RequestCast') "
             "} catch { $_ | Format-List * -Force; exit 1 }",
-            timeout=25,
+            25,
         )
 
 
@@ -471,14 +445,14 @@ def _system_summary(settings: dict[str, Any], urls: list[str]) -> str:
         f"URLs tested: {', '.join(urls)}",
         f"Configured bind: {settings.get('bind_host')}:{settings.get('bind_port')}",
         "",
-        "This bundle redacts passwords, password hashes, salts, API keys, session secrets, and Deezer ARL values.",
+        "Passwords, password hashes, salts, API keys, session secrets, cookies, form contents, and Deezer ARL values are not included.",
         "Send the entire RequestCast-Diagnostics.zip file. Do not extract and send individual files unless asked.",
     ]
     return "\n".join(lines) + "\n"
 
 
 def collect_bundle(urls: list[str], *, duration: float = 20.0, show_dialog: bool = False) -> Path:
-    """Collect cross-process network evidence and create one ZIP for support."""
+    """Collect independent Windows networking evidence and create one support ZIP."""
     settings = config.load()
     port = int(settings.get("bind_port") or config.DEFAULT_BIND_PORT)
     work = diagnostics_work_path()
@@ -491,10 +465,10 @@ def collect_bundle(urls: list[str], *, duration: float = 20.0, show_dialog: bool
         _write(work / "environment-redacted.json", json.dumps(sanitized_environment(), indent=2, sort_keys=True))
         _collect_commands(work, urls, port)
         _collect_http_timeline(work, urls, duration)
-        _copy_if_exists(server.startup_log_path(), work / "logs" / "requestcast-startup.log")
-        _copy_if_exists(http_log_path(), work / "logs" / "requestcast-http.log")
+        _copy_text_if_exists(server.startup_log_path(), work / "logs" / "requestcast-startup.log")
+        _copy_text_if_exists(http_log_path(), work / "logs" / "requestcast-http.log")
         hosts = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "drivers" / "etc" / "hosts"
-        _copy_if_exists(hosts, work / "network" / "windows-hosts-file.txt")
+        _copy_text_if_exists(hosts, work / "network" / "windows-hosts-file.txt")
         temporary = archive.with_suffix(".zip.tmp")
         temporary.unlink(missing_ok=True)
         with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
@@ -505,13 +479,11 @@ def collect_bundle(urls: list[str], *, duration: float = 20.0, show_dialog: bool
         server.log_startup(f"Full diagnostic bundle created: {archive}")
         print(f"Full diagnostic bundle created: {archive}", flush=True)
     except BaseException:
-        failure = work / "DIAGNOSTIC-COLLECTION-FAILED.txt"
-        _write(failure, traceback.format_exc())
+        _write(work / "DIAGNOSTIC-COLLECTION-FAILED.txt", traceback.format_exc())
         server.log_startup("Diagnostic collection failed:\n" + traceback.format_exc())
     if show_dialog and os.name == "nt":
         try:
             import ctypes
-
             ctypes.windll.user32.MessageBoxW(
                 None,
                 f"RequestCast diagnostics were saved here:\n\n{archive}\n\nSend this ZIP file for analysis.",
@@ -524,7 +496,7 @@ def collect_bundle(urls: list[str], *, duration: float = 20.0, show_dialog: bool
 
 
 def start_background_collection(urls: list[str], *, duration: float = 20.0) -> threading.Thread:
-    """Build a diagnostic ZIP after normal startup without blocking the server."""
+    """Build a diagnostic ZIP after startup without blocking the web server."""
     thread = threading.Thread(
         target=collect_bundle,
         kwargs={"urls": urls, "duration": duration, "show_dialog": False},
