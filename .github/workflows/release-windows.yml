@@ -121,7 +121,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Adds a full Windows diagnostic collector for cases where RequestCast responds internally but no browser can reach it. Every normal startup records request-level traffic and automatically creates RequestCast-Diagnostics.zip. The package also includes Collect RequestCast Diagnostics.cmd for an on-demand test. The ZIP captures repeated Python, curl.exe, PowerShell, socket, listener, proxy, Winsock, route, adapter, firewall, antivirus, AppX browser, process, and event-log evidence. It excludes passwords, hashes, salts, API keys, session secrets, cookies, form contents, and Deezer ARL values."
+          $notes = "Fixes the web interface hanging after RequestCast returned HTTP 200. The diagnostics showed that curl.exe and PowerShell reached /setup but timed out with zero body bytes while Waitress reported that Flask had generated the complete 4 KB page. RequestCast had overridden Waitress send_bytes to 18,000, causing small responses to remain buffered. This release restores immediate one-byte flushing and adds a packaged end-to-end test that starts RequestCast and must download the complete setup page before a Windows release can be published."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
