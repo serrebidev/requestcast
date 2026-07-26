@@ -6,7 +6,7 @@ import sys
 import threading
 import webbrowser
 
-from requestcast import config
+from requestcast import config, server
 from requestcast.app import app
 
 
@@ -22,24 +22,26 @@ def main() -> int:
     settings = config.load()
     host = str(settings.get("bind_host") or config.DEFAULT_BIND_HOST)
     port = int(settings.get("bind_port") or config.DEFAULT_BIND_PORT)
-    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    url = f"http://{display_host}:{port}/"
+    urls = server.browser_urls(host, port)
 
-    print(f"RequestCast is running at {url}")
+    server.allow_loopback_http_sessions(app, host)
+
+    print("RequestCast is running at:")
+    for url in urls:
+        print(f"  {url}")
     if not config.is_configured(settings):
         print("First run: the browser will open the setup page.")
     if "--no-browser" not in sys.argv:
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.0, lambda: webbrowser.open(urls[0])).start()
 
     from waitress import serve
 
     serve(
         app,
-        host=host,
-        port=port,
         threads=6,
         channel_timeout=300,
         send_bytes=18_000,
+        **server.waitress_bind_options(host, port),
     )
     return 0
 
