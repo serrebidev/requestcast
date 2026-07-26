@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +28,16 @@ class LoopbackAccessTests(unittest.TestCase):
         self.assertEqual(
             server.browser_urls("127.0.0.1", 8797),
             ["http://localhost:8797/", "http://127.0.0.1:8797/"],
+        )
+
+    def test_automatic_launch_prefers_ipv4_loopback(self) -> None:
+        self.assertEqual(
+            server.preferred_browser_url("localhost", 8797),
+            "http://127.0.0.1:8797/",
+        )
+        self.assertEqual(
+            server.preferred_browser_url("127.0.0.1", 8797),
+            "http://127.0.0.1:8797/",
         )
 
     @patch("requestcast.server.ipv6_loopback_available", return_value=True)
@@ -53,6 +63,42 @@ class LoopbackAccessTests(unittest.TestCase):
         app = DummyApp()
         server.allow_loopback_http_sessions(app, "0.0.0.0")
         self.assertTrue(app.config["SESSION_COOKIE_SECURE"])
+
+    @patch("requestcast.server.socket.create_connection")
+    def test_wait_for_server_closes_successful_connection(self, create_connection) -> None:
+        connection = MagicMock()
+        create_connection.return_value = connection
+
+        self.assertTrue(server.wait_for_server("http://127.0.0.1:8797/", timeout=1.0))
+        create_connection.assert_called_once_with(("127.0.0.1", 8797), timeout=1.0)
+        connection.close.assert_called_once_with()
+
+    def test_windows_browser_launch_uses_startfile_first(self) -> None:
+        with (
+            patch.object(server.os, "name", "nt"),
+            patch.object(server.os, "startfile", create=True) as startfile,
+            patch("requestcast.server.webbrowser.open") as browser_open,
+        ):
+            self.assertTrue(server.open_default_browser("http://127.0.0.1:8797/"))
+            startfile.assert_called_once_with("http://127.0.0.1:8797/")
+            browser_open.assert_not_called()
+
+    def test_windows_browser_launch_falls_back_to_rundll32(self) -> None:
+        with (
+            patch.object(server.os, "name", "nt"),
+            patch.object(server.os, "startfile", side_effect=OSError, create=True),
+            patch("requestcast.server.subprocess.Popen") as popen,
+        ):
+            self.assertTrue(server.open_default_browser("http://127.0.0.1:8797/"))
+            popen.assert_called_once_with(
+                [
+                    "rundll32.exe",
+                    "url.dll,FileProtocolHandler",
+                    "http://127.0.0.1:8797/",
+                ],
+                stdout=server.subprocess.DEVNULL,
+                stderr=server.subprocess.DEVNULL,
+            )
 
 
 if __name__ == "__main__":
