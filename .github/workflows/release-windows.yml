@@ -4,12 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to create or update
-        required: true
-        default: v1.2.1
+        description: Optional release tag override
+        required: false
+        default: ''
+  push:
+    branches:
+      - main
+    paths:
+      - requestcast/__init__.py
 
 permissions:
   contents: write
+
+concurrency:
+  group: requestcast-windows-release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -18,6 +27,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -32,32 +43,69 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
+      - name: Integrate YouTube collection support
+        shell: pwsh
+        run: |
+          python scripts/apply_youtube_collections_patch.py
+          $changes = git status --porcelain -- requestcast/app.py
+          if ($changes) {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add requestcast/app.py
+            git commit -m "Enable YouTube playlist and channel URLs"
+            git push origin HEAD:main
+          }
+          $sourceSha = git rev-parse HEAD
+          "SOURCE_SHA=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Determine release metadata
+        shell: pwsh
+        run: |
+          $version = python -c "from requestcast import __version__; print(__version__)"
+          $requestedTag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($requestedTag)) {
+            $tag = "v$version"
+          }
+          else {
+            $tag = $requestedTag
+          }
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_TITLE=RequestCast $version" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_ZIP=RequestCast-$tag-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Test playlist and channel URLs
+        shell: pwsh
+        env:
+          REQUESTCAST_DISABLE_WORKER: '1'
+        run: |
+          python -m compileall -q requestcast tests
+          python tests/test_youtube_collections.py
+
       - name: Build and test portable executable
         shell: pwsh
         run: python scripts/build_windows.py
 
       - name: Create release ZIP
         shell: pwsh
-        run: |
-          $zip = "RequestCast-${{ inputs.tag }}-windows-x64.zip"
-          Compress-Archive -Path "dist\RequestCast\*" -DestinationPath $zip -Force
-          "RELEASE_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+        run: Compress-Archive -Path "dist\RequestCast\*" -DestinationPath "$env:RELEASE_ZIP" -Force
 
       - name: Create or update GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "${{ inputs.tag }}" *> $null
+          $notes = "Adds direct YouTube playlist and channel URL support. Playlist links, video links containing a playlist, @handle channels, /channel/, /c/, and /user/ channel URLs can now be queued and downloaded through yt-dlp."
+          gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "${{ inputs.tag }}" "$env:RELEASE_ZIP" --clobber
+            gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
+            gh release upload "$env:RELEASE_TAG" "$env:RELEASE_ZIP" --clobber
           }
           else {
-            gh release create "${{ inputs.tag }}" "$env:RELEASE_ZIP" --target main --title "RequestCast 1.2.1" --notes "Fixes the Windows startup crash caused by an incompatible bundled NumPy dependency."
+            gh release create "$env:RELEASE_TAG" "$env:RELEASE_ZIP" --target "$env:SOURCE_SHA" --title "$env:RELEASE_TITLE" --notes "$notes"
           }
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RequestCast-${{ inputs.tag }}-windows-x64
+          name: RequestCast-${{ env.RELEASE_TAG }}-windows-x64
           path: ${{ env.RELEASE_ZIP }}
