@@ -48,7 +48,7 @@ class BufferedClosingMiddleware:
             "headers": [],
             "exc_info": None,
         }
-        written: list[bytes] = []
+        body_parts: list[bytes] = []
 
         def captured_start_response(
             status: str,
@@ -64,7 +64,7 @@ class BufferedClosingMiddleware:
             def write(data: bytes) -> None:
                 if not isinstance(data, (bytes, bytearray, memoryview)):
                     raise TypeError("WSGI write() data must be bytes")
-                written.append(bytes(data))
+                body_parts.append(bytes(data))
 
             return write
 
@@ -74,10 +74,8 @@ class BufferedClosingMiddleware:
         )
 
         response: Iterable[bytes] | None = None
-        body_parts: list[bytes] = []
         try:
             response = self.application(environ, captured_start_response)
-            body_parts.extend(written)
             for chunk in response:
                 if not isinstance(chunk, (bytes, bytearray, memoryview)):
                     raise TypeError("WSGI response chunks must be bytes")
