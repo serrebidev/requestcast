@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
-import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -12,7 +11,7 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from requestcast import server
+from requestcast import browser_shell, server
 
 
 class DummyApp:
@@ -83,38 +82,46 @@ class LoopbackAccessTests(unittest.TestCase):
         self.assertEqual(reachable.call_count, 2)
         sleep.assert_called_once()
 
-    def test_extracts_browser_executable_from_registry_command(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_name:
-            executable = Path(temp_name) / "browser.exe"
-            executable.touch()
-            self.assertEqual(
-                server._extract_executable(f'"{executable}" --single-argument %1'),
-                executable,
-            )
-
-    def test_windows_browser_launch_starts_resolved_browser_directly(self) -> None:
-        executable = Path("C:/Browser/browser.exe")
+    def test_windows_browser_launch_uses_url_association_first(self) -> None:
+        url = "http://127.0.0.1:8797/"
         with (
-            patch.object(server.os, "name", "nt"),
-            patch("requestcast.server.browser_executables", return_value=[executable]),
-            patch("requestcast.server._launch_executable", return_value=True) as launch,
-            patch("requestcast.server._shell_execute") as shell_execute,
+            patch.object(browser_shell.os, "name", "nt"),
+            patch("requestcast.browser_shell._startfile", return_value=True) as startfile,
+            patch("requestcast.browser_shell._shell_execute") as shell_execute,
+            patch("requestcast.browser_shell._rundll32_url") as rundll32,
+            patch("requestcast.browser_shell._explorer_open") as explorer,
+            patch("requestcast.browser_shell.server.log_startup"),
         ):
-            self.assertTrue(server.open_default_browser("http://127.0.0.1:8797/"))
-            launch.assert_called_once_with(executable, "http://127.0.0.1:8797/")
+            self.assertTrue(browser_shell.open_default_browser(url))
+            startfile.assert_called_once_with(url)
             shell_execute.assert_not_called()
+            rundll32.assert_not_called()
+            explorer.assert_not_called()
+
+    def test_windows_browser_launch_falls_back_to_shell_execute(self) -> None:
+        url = "http://127.0.0.1:8797/"
+        with (
+            patch.object(browser_shell.os, "name", "nt"),
+            patch("requestcast.browser_shell._startfile", return_value=False),
+            patch("requestcast.browser_shell._shell_execute", return_value=True) as shell_execute,
+            patch("requestcast.browser_shell._rundll32_url") as rundll32,
+            patch("requestcast.browser_shell.server.log_startup"),
+        ):
+            self.assertTrue(browser_shell.open_default_browser(url))
+            shell_execute.assert_called_once_with(url)
+            rundll32.assert_not_called()
 
     def test_browser_launcher_runs_synchronously_after_health_check(self) -> None:
         with (
-            patch("requestcast.server.create_browser_shortcut", return_value=None),
-            patch("requestcast.server.wait_for_server", return_value=True) as wait,
-            patch("requestcast.server.open_default_browser", return_value=True) as open_browser,
+            patch("requestcast.browser_shell.server.create_browser_shortcut", return_value=None),
+            patch("requestcast.browser_shell.server.wait_for_server", return_value=True) as wait,
+            patch("requestcast.browser_shell.open_default_browser", return_value=True) as open_browser,
         ):
             self.assertTrue(
-                server.launch_browser_when_ready("http://127.0.0.1:8797/", timeout=5.0)
+                browser_shell.launch_browser_when_ready("http://127.0.0.1:8797/", timeout=5.0)
             )
             wait.assert_called_once_with("http://127.0.0.1:8797/", timeout=5.0)
-            open_browser.assert_called_once_with("http://127.0.0.1:8797/")
+            open_browser.assert_called_once_with("http://127.0.0.1:8797/", None)
 
 
 if __name__ == "__main__":

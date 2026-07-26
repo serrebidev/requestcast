@@ -117,7 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Reworks Windows startup instead of merely handing a URL to the shell. RequestCast now starts Waitress on a dedicated server thread, verifies the real /healthz endpoint, launches the registered browser executable directly from the main thread, and falls back through Windows shell handlers. It also detects an already-running RequestCast instance, creates an Open RequestCast.url shortcut, writes requestcast-startup.log, and guarantees an IPv4 listener even when an older configuration uses an IPv6 wildcard bind."
+          $notes = "Fixes browser startup for Microsoft Store and MSIX browsers such as Firefox Nightly. RequestCast no longer launches the browser executable path found in the registry, which could start Firefox without opening the RequestCast page. It now waits for the verified /healthz endpoint and asks Windows to open http://127.0.0.1:8797/ through the registered HTTP URL association, with ShellExecuteW, FileProtocolHandler, Internet shortcut, and Explorer fallbacks."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
