@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import traceback
@@ -31,6 +32,8 @@ def main() -> int:
         return 0
 
     diagnostics.install_exception_hooks()
+    if diagnostic_only:
+        os.environ["REQUESTCAST_DISABLE_WORKER"] = "1"
 
     from requestcast.app import app
 
