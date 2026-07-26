@@ -34,7 +34,7 @@ def reserve_local_port() -> int:
 
 
 def test_packaged_web_server(executable: Path, working_directory: Path) -> bool:
-    """Require the packaged executable to deliver the complete setup page promptly."""
+    """Require the packaged executable to deliver a fully framed setup page promptly."""
     port = reserve_local_port()
     with tempfile.TemporaryDirectory(prefix="requestcast-smoke-") as temporary_name:
         temporary = Path(temporary_name)
@@ -72,21 +72,32 @@ def test_packaged_web_server(executable: Path, working_directory: Path) -> bool:
                         headers={"Connection": "close", "User-Agent": "RequestCast-build-smoke-test"},
                     )
                     response = connection.getresponse()
+                    response_version = response.version
+                    content_length = response.getheader("Content-Length")
+                    connection_header = str(response.getheader("Connection") or "").casefold()
+                    transfer_encoding = response.getheader("Transfer-Encoding")
                     body = response.read(128 * 1024)
                     if (
                         response.status == 200
+                        and response_version == 10
+                        and content_length == str(len(body))
+                        and connection_header == "close"
+                        and transfer_encoding is None
                         and len(body) > 1000
                         and b"Set up RequestCast" in body
                     ):
                         print(
-                            f"Packaged web response succeeded: HTTP {response.status}, "
+                            f"Packaged web response succeeded: HTTP/1.0 {response.status}, "
+                            f"Content-Length {content_length}, Connection close, "
                             f"{len(body)} bytes received from /setup."
                         )
                         success = True
                         break
                     error = (
-                        f"Unexpected packaged web response: HTTP {response.status}, "
-                        f"{len(body)} bytes."
+                        f"Unexpected packaged web response: version={response_version}, "
+                        f"HTTP={response.status}, Content-Length={content_length!r}, "
+                        f"Connection={connection_header!r}, Transfer-Encoding={transfer_encoding!r}, "
+                        f"bytes={len(body)}."
                     )
                 except (OSError, http.client.HTTPException) as exc:
                     error = f"Packaged web request failed: {exc!r}"
@@ -141,6 +152,8 @@ def main() -> int:
         f"{ROOT / 'requestcast' / 'static'}{separator}requestcast/static",
         "--hidden-import",
         "waitress",
+        "--hidden-import",
+        "requestcast.http_framing",
         "--hidden-import",
         "openpyxl",
         "--hidden-import",
@@ -206,7 +219,7 @@ def main() -> int:
 
     if not test_packaged_web_server(target / f"{NAME}.exe", target):
         print(
-            "The packaged executable failed to deliver its complete setup page over HTTP.",
+            "The packaged executable failed to deliver a correctly framed setup page over HTTP.",
             file=sys.stderr,
         )
         return 1

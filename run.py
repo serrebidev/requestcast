@@ -11,6 +11,7 @@ import traceback
 from typing import Any, Callable
 
 from requestcast import browser_shell, config, diagnostics, server
+from requestcast.http_framing import BufferedClosingMiddleware, RequestCastHTTP10RequestHandler
 
 
 class HttpServerController:
@@ -28,7 +29,7 @@ class HttpServerController:
 
 
 def selected_http_backend() -> str:
-    """Use Werkzeug on Windows, where Waitress stalled before sending response bodies."""
+    """Use Werkzeug on Windows, with deterministic HTTP/1.0 framing."""
     return "werkzeug-threaded" if os.name == "nt" else "waitress"
 
 
@@ -58,7 +59,7 @@ def show_startup_error(message: str) -> None:
 def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
     """Create the dependable platform-specific HTTP server."""
     if os.name == "nt":
-        from werkzeug.serving import make_server
+        from werkzeug.serving import WSGIRequestHandler, make_server
 
         if server.is_loopback_host(host):
             bind_host = "127.0.0.1"
@@ -67,6 +68,7 @@ def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
         else:
             bind_host = host
 
+        WSGIRequestHandler.protocol_version = RequestCastHTTP10RequestHandler.protocol_version
         instance = make_server(bind_host, port, app, threaded=True)
 
         def close_werkzeug() -> None:
@@ -74,7 +76,9 @@ def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
             instance.server_close()
 
         server.log_startup(
-            f"Windows HTTP backend selected: Werkzeug threaded server; bind={bind_host}:{port}"
+            "Windows HTTP backend selected: Werkzeug threaded server; "
+            f"bind={bind_host}:{port}; protocol=HTTP/1.0; framing=buffered-content-length; "
+            "connection=close"
         )
         return HttpServerController(
             "werkzeug-threaded",
@@ -93,7 +97,10 @@ def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
                 channel_timeout=300,
                 **bind_options,
             )
-            server.log_startup(f"Waitress bind selected: {bind_options}")
+            server.log_startup(
+                f"Waitress bind selected: {bind_options}; framing=buffered-content-length; "
+                "connection=close"
+            )
             return HttpServerController("waitress", instance.run, instance.close)
         except BaseException as exc:
             bind_error = exc
@@ -107,6 +114,7 @@ def main() -> int:
         import pypdf  # noqa: F401
         import waitress  # noqa: F401
         import werkzeug.serving  # noqa: F401
+        import requestcast.http_framing  # noqa: F401
 
         print("Packaged imports succeeded.")
         return 0
@@ -139,14 +147,15 @@ def main() -> int:
     from requestcast.app import app
 
     server.allow_loopback_http_sessions(app, host)
-    if not getattr(app, "_requestcast_diagnostics_wrapped", False):
-        app.wsgi_app = diagnostics.RequestLoggingMiddleware(app.wsgi_app)
-        app._requestcast_diagnostics_wrapped = True
+    if not getattr(app, "_requestcast_http_framing_wrapped", False):
+        app.wsgi_app = BufferedClosingMiddleware(app.wsgi_app, diagnostics.log_http)
+        app._requestcast_http_framing_wrapped = True
 
     print("RequestCast web interface:")
     for url in urls:
         print(f"  {url}")
     print(f"HTTP backend: {selected_http_backend()}")
+    print("HTTP framing: HTTP/1.0, exact Content-Length, Connection: close")
     print(f"Startup diagnostics: {server.startup_log_path()}")
     print(f"HTTP request log: {diagnostics.http_log_path()}")
     if diagnostics_enabled:
@@ -205,13 +214,13 @@ def main() -> int:
         server_thread.join(timeout=5)
         return 0 if not server_errors else 1
 
-    if diagnostics_enabled:
-        diagnostics.start_background_collection(urls, duration=30.0)
-
     if not config.is_configured(settings):
         print("First run: the browser will open the setup page.")
     if "--no-browser" not in sys.argv:
         browser_shell.launch_browser_when_ready(launch_url)
+
+    if diagnostics_enabled:
+        diagnostics.start_background_collection(urls, duration=30.0)
 
     try:
         while server_thread.is_alive():
