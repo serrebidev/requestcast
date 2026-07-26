@@ -43,6 +43,10 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
+      - name: Verify Requests dependency compatibility
+        shell: pwsh
+        run: python -W error -c "import requests; print(f'Requests {requests.__version__} dependency check passed.')"
+
       - name: Integrate YouTube collection support
         shell: pwsh
         run: |
@@ -109,7 +113,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Adds direct YouTube playlist and channel URL support. Playlist links, video links containing a playlist, @handle channels, /channel/, /c/, and /user/ channel URLs can now be queued and downloaded through yt-dlp."
+          $notes = "Fixes the RequestsDependencyWarning shown at startup by upgrading Requests and pinning compatible urllib3, charset-normalizer, and chardet versions. The Windows build now fails automatically if this dependency warning returns."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
