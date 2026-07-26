@@ -1,0 +1,35 @@
+name: Record Windows release status
+
+on:
+  workflow_run:
+    workflows:
+      - Build Windows release
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Record result
+        shell: bash
+        run: |
+          cat > release-windows-status.txt <<'EOF'
+          conclusion=${{ github.event.workflow_run.conclusion }}
+          run_id=${{ github.event.workflow_run.id }}
+          run_url=${{ github.event.workflow_run.html_url }}
+          source_sha=${{ github.event.workflow_run.head_sha }}
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release-windows-status.txt
+          git commit -m "Record Windows release status: ${{ github.event.workflow_run.conclusion }}"
+          git push origin HEAD:main
