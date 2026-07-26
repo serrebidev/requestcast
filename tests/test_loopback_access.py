@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -10,8 +11,10 @@ from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+os.environ.setdefault("REQUESTCAST_DISABLE_WORKER", "1")
 
 from requestcast import browser_shell, server
+from requestcast.app import app as flask_app
 
 
 class DummyApp:
@@ -60,6 +63,12 @@ class LoopbackAccessTests(unittest.TestCase):
         server.allow_loopback_http_sessions(app, "0.0.0.0")
         self.assertTrue(app.config["SESSION_COOKIE_SECURE"])
 
+    def test_real_flask_root_page_renders_requestcast_html(self) -> None:
+        response = flask_app.test_client().get("/", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"RequestCast", response.data)
+        self.assertIn("text/html", response.content_type)
+
     @patch("requestcast.server.http.client.HTTPConnection")
     def test_health_check_requires_requestcast_response(self, connection_class) -> None:
         connection = connection_class.return_value
@@ -82,45 +91,72 @@ class LoopbackAccessTests(unittest.TestCase):
         self.assertEqual(reachable.call_count, 2)
         sleep.assert_called_once()
 
-    def test_windows_browser_launch_uses_url_association_first(self) -> None:
+    @patch(
+        "requestcast.browser_shell._request_page",
+        side_effect=[
+            (302, {"location": "/login"}, b""),
+            (200, {"content-type": "text/html; charset=utf-8"}, b"<title>RequestCast</title>"),
+        ],
+    )
+    def test_real_web_page_probe_follows_local_redirects(self, request_page) -> None:
+        ok, detail = browser_shell.probe_web_interface("http://127.0.0.1:8797/")
+        self.assertTrue(ok)
+        self.assertIn("RequestCast HTML verified", detail)
+        self.assertEqual(request_page.call_count, 2)
+
+    @patch(
+        "requestcast.browser_shell._request_page",
+        return_value=(500, {"content-type": "text/html"}, b"Internal Server Error"),
+    )
+    def test_real_web_page_probe_rejects_broken_root_page(self, _request_page) -> None:
+        ok, detail = browser_shell.probe_web_interface("http://127.0.0.1:8797/")
+        self.assertFalse(ok)
+        self.assertIn("HTTP 500", detail)
+
+    def test_windows_browser_launch_uses_clean_no_proxy_browser_first(self) -> None:
+        url = "http://127.0.0.1:8797/"
+        executable = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+        with (
+            patch.object(browser_shell.os, "name", "nt"),
+            patch("requestcast.browser_shell._launch_clean_chromium", return_value=executable) as clean,
+            patch("requestcast.browser_shell._startfile") as startfile,
+            patch("requestcast.browser_shell._shell_execute") as shell_execute,
+            patch("requestcast.browser_shell.server.log_startup"),
+        ):
+            self.assertTrue(browser_shell.open_default_browser(url))
+            clean.assert_called_once_with(url)
+            startfile.assert_not_called()
+            shell_execute.assert_not_called()
+
+    def test_windows_browser_launch_falls_back_to_url_association(self) -> None:
         url = "http://127.0.0.1:8797/"
         with (
             patch.object(browser_shell.os, "name", "nt"),
+            patch("requestcast.browser_shell._launch_clean_chromium", return_value=None),
             patch("requestcast.browser_shell._startfile", return_value=True) as startfile,
             patch("requestcast.browser_shell._shell_execute") as shell_execute,
-            patch("requestcast.browser_shell._rundll32_url") as rundll32,
-            patch("requestcast.browser_shell._explorer_open") as explorer,
             patch("requestcast.browser_shell.server.log_startup"),
         ):
             self.assertTrue(browser_shell.open_default_browser(url))
             startfile.assert_called_once_with(url)
             shell_execute.assert_not_called()
-            rundll32.assert_not_called()
-            explorer.assert_not_called()
 
-    def test_windows_browser_launch_falls_back_to_shell_execute(self) -> None:
-        url = "http://127.0.0.1:8797/"
-        with (
-            patch.object(browser_shell.os, "name", "nt"),
-            patch("requestcast.browser_shell._startfile", return_value=False),
-            patch("requestcast.browser_shell._shell_execute", return_value=True) as shell_execute,
-            patch("requestcast.browser_shell._rundll32_url") as rundll32,
-            patch("requestcast.browser_shell.server.log_startup"),
-        ):
-            self.assertTrue(browser_shell.open_default_browser(url))
-            shell_execute.assert_called_once_with(url)
-            rundll32.assert_not_called()
-
-    def test_browser_launcher_runs_synchronously_after_health_check(self) -> None:
+    def test_browser_launcher_checks_real_page_before_opening(self) -> None:
         with (
             patch("requestcast.browser_shell.server.create_browser_shortcut", return_value=None),
             patch("requestcast.browser_shell.server.wait_for_server", return_value=True) as wait,
+            patch(
+                "requestcast.browser_shell.probe_web_interface",
+                return_value=(True, "RequestCast HTML verified"),
+            ) as probe,
             patch("requestcast.browser_shell.open_default_browser", return_value=True) as open_browser,
+            patch("requestcast.browser_shell.server.log_startup"),
         ):
             self.assertTrue(
                 browser_shell.launch_browser_when_ready("http://127.0.0.1:8797/", timeout=5.0)
             )
             wait.assert_called_once_with("http://127.0.0.1:8797/", timeout=5.0)
+            probe.assert_called_once_with("http://127.0.0.1:8797/")
             open_browser.assert_called_once_with("http://127.0.0.1:8797/", None)
 
 
