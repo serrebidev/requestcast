@@ -10,6 +10,13 @@ import traceback
 from requestcast import browser_shell, config, diagnostics, server
 
 
+# Waitress deprecated this adjustment and has defaulted it to 1 since 1.3.
+# A larger value buffers small pages inside Waitress. RequestCast's setup page
+# is only about 4 KB, so the old 18,000-byte override caused browsers and curl
+# to wait forever even though Flask had already generated the complete response.
+WAITRESS_SEND_BYTES = 1
+
+
 def main() -> int:
     if "--check-imports" in sys.argv:
         import openpyxl  # noqa: F401
@@ -20,6 +27,10 @@ def main() -> int:
         return 0
 
     diagnostic_only = "--diagnose" in sys.argv
+    diagnostics_enabled = diagnostic_only or (
+        "--no-diagnostics" not in sys.argv
+        and os.environ.get("REQUESTCAST_DISABLE_DIAGNOSTICS") != "1"
+    )
     settings = config.load()
     host = str(settings.get("bind_host") or config.DEFAULT_BIND_HOST)
     port = int(settings.get("bind_port") or config.DEFAULT_BIND_PORT)
@@ -47,13 +58,15 @@ def main() -> int:
         print(f"  {url}")
     print(f"Startup diagnostics: {server.startup_log_path()}")
     print(f"HTTP request log: {diagnostics.http_log_path()}")
-    print(f"Full diagnostic ZIP: {diagnostics.diagnostics_zip_path()}")
+    if diagnostics_enabled:
+        print(f"Full diagnostic ZIP: {diagnostics.diagnostics_zip_path()}")
 
     if server.requestcast_is_reachable(launch_url, timeout=0.75):
         print("RequestCast is already running. Opening the existing web interface.")
         if "--no-browser" not in sys.argv:
             browser_shell.launch_browser_when_ready(launch_url, timeout=2.0)
-        diagnostics.collect_bundle(urls, duration=10.0, show_dialog=False)
+        if diagnostics_enabled:
+            diagnostics.collect_bundle(urls, duration=10.0, show_dialog=False)
         return 0
 
     from waitress import create_server
@@ -66,10 +79,12 @@ def main() -> int:
                 app,
                 threads=6,
                 channel_timeout=300,
-                send_bytes=18_000,
+                send_bytes=WAITRESS_SEND_BYTES,
                 **bind_options,
             )
-            server.log_startup(f"Waitress bind selected: {bind_options}")
+            server.log_startup(
+                f"Waitress bind selected: {bind_options}; send_bytes={WAITRESS_SEND_BYTES}"
+            )
             break
         except BaseException as exc:
             bind_error = exc
@@ -78,7 +93,8 @@ def main() -> int:
     if http_server is None:
         print(f"RequestCast could not start its web server: {bind_error}", file=sys.stderr)
         print(f"See {server.startup_log_path()} for startup details.", file=sys.stderr)
-        diagnostics.collect_bundle(urls, duration=0.0, show_dialog=True)
+        if diagnostics_enabled:
+            diagnostics.collect_bundle(urls, duration=0.0, show_dialog=True)
         return 1
 
     server_errors: list[BaseException] = []
@@ -100,7 +116,8 @@ def main() -> int:
         server_thread.join(timeout=5)
         return 0 if not server_errors else 1
 
-    diagnostics.start_background_collection(urls, duration=30.0)
+    if diagnostics_enabled:
+        diagnostics.start_background_collection(urls, duration=30.0)
 
     if not config.is_configured(settings):
         print("First run: the browser will open the setup page.")
@@ -118,7 +135,8 @@ def main() -> int:
     if server_errors:
         print(f"RequestCast's web server stopped: {server_errors[0]}", file=sys.stderr)
         print(f"See {server.startup_log_path()} for startup details.", file=sys.stderr)
-        diagnostics.collect_bundle(urls, duration=0.0, show_dialog=True)
+        if diagnostics_enabled:
+            diagnostics.collect_bundle(urls, duration=0.0, show_dialog=True)
         return 1
     server.log_startup("RequestCast server thread ended without a recorded exception.")
     return 0
