@@ -117,7 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Restores Windows web interface access through both http://localhost:8797/ and http://127.0.0.1:8797/. Loopback mode now listens on IPv4 and IPv6 when available, and older settings can no longer force Secure session cookies over plain local HTTP. Also includes the Requests dependency warning fix from 1.3.1."
+          $notes = "Fixes the Windows browser not opening automatically. RequestCast now waits until the local web server is accepting connections, then opens http://127.0.0.1:8797/ through the Windows default-browser handler with multiple fallbacks. Both localhost and 127.0.0.1 remain available. Also includes the loopback and Requests dependency fixes from 1.3.2."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"

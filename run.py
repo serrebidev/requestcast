@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import sys
-import threading
-import webbrowser
 
 from requestcast import config, server
 from requestcast.app import app
@@ -23,6 +21,7 @@ def main() -> int:
     host = str(settings.get("bind_host") or config.DEFAULT_BIND_HOST)
     port = int(settings.get("bind_port") or config.DEFAULT_BIND_PORT)
     urls = server.browser_urls(host, port)
+    launch_url = server.preferred_browser_url(host, port)
 
     server.allow_loopback_http_sessions(app, host)
 
@@ -32,7 +31,8 @@ def main() -> int:
     if not config.is_configured(settings):
         print("First run: the browser will open the setup page.")
     if "--no-browser" not in sys.argv:
-        threading.Timer(1.0, lambda: webbrowser.open(urls[0])).start()
+        print(f"Waiting for the web server before opening {launch_url}")
+        server.start_browser_launcher(launch_url)
 
     from waitress import serve
 
