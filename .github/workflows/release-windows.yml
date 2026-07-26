@@ -78,7 +78,7 @@ jobs:
         env:
           REQUESTCAST_DISABLE_WORKER: '1'
         run: |
-          $log = "release-windows-test.log"
+          $log = "release-windows-test-output.txt"
           python -m compileall -q requestcast tests *> $log
           $exitCode = $LASTEXITCODE
           if ($exitCode -eq 0) {
