@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("REQUESTCAST_DISABLE_WORKER", "1")
 
+import run as entrypoint
 from requestcast import browser_shell, server
 from requestcast.app import app as flask_app
 
@@ -52,6 +53,9 @@ class LoopbackAccessTests(unittest.TestCase):
                 {"host": "0.0.0.0", "port": 8797},
             ],
         )
+
+    def test_waitress_flushes_small_pages_immediately(self) -> None:
+        self.assertEqual(entrypoint.WAITRESS_SEND_BYTES, 1)
 
     def test_legacy_secure_cookie_is_disabled_for_loopback_http(self) -> None:
         app = DummyApp()

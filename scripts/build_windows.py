@@ -9,14 +9,106 @@ Usage:  python scripts/build_windows.py
 
 from __future__ import annotations
 
+import http.client
+import os
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 NAME = "RequestCast"
+
+
+def reserve_local_port() -> int:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+    finally:
+        probe.close()
+
+
+def test_packaged_web_server(executable: Path, working_directory: Path) -> bool:
+    """Require the packaged executable to deliver the complete setup page promptly."""
+    port = reserve_local_port()
+    with tempfile.TemporaryDirectory(prefix="requestcast-smoke-") as temporary_name:
+        temporary = Path(temporary_name)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "REQUESTCAST_BIND_HOST": "127.0.0.1",
+                "REQUESTCAST_BIND_PORT": str(port),
+                "REQUESTCAST_CONFIG": str(temporary / "requestcast.json"),
+                "REQUESTCAST_DISABLE_WORKER": "1",
+                "REQUESTCAST_DISABLE_DIAGNOSTICS": "1",
+            }
+        )
+        process = subprocess.Popen(
+            [str(executable), "--no-browser", "--no-diagnostics"],
+            cwd=working_directory,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        success = False
+        error = "The packaged server did not become reachable."
+        try:
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    error = f"The packaged server exited early with code {process.returncode}."
+                    break
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
+                try:
+                    connection.request(
+                        "GET",
+                        "/setup",
+                        headers={"Connection": "close", "User-Agent": "RequestCast-build-smoke-test"},
+                    )
+                    response = connection.getresponse()
+                    body = response.read(128 * 1024)
+                    if (
+                        response.status == 200
+                        and len(body) > 1000
+                        and b"Set up RequestCast" in body
+                    ):
+                        print(
+                            f"Packaged web response succeeded: HTTP {response.status}, "
+                            f"{len(body)} bytes received from /setup."
+                        )
+                        success = True
+                        break
+                    error = (
+                        f"Unexpected packaged web response: HTTP {response.status}, "
+                        f"{len(body)} bytes."
+                    )
+                except (OSError, http.client.HTTPException) as exc:
+                    error = f"Packaged web request failed: {exc!r}"
+                    time.sleep(0.2)
+                finally:
+                    connection.close()
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate(timeout=10)
+
+        if stdout:
+            print(stdout, end="")
+        if stderr:
+            print(stderr, end="", file=sys.stderr)
+        if not success:
+            print(error, file=sys.stderr)
+        return success
 
 
 def main() -> int:
@@ -111,6 +203,13 @@ def main() -> int:
     if smoke_test.returncode != 0:
         print("The packaged executable failed its import smoke test.", file=sys.stderr)
         return smoke_test.returncode or 1
+
+    if not test_packaged_web_server(target / f"{NAME}.exe", target):
+        print(
+            "The packaged executable failed to deliver its complete setup page over HTTP.",
+            file=sys.stderr,
+        )
+        return 1
 
     for extra in ("README.md", "LICENSE"):
         source = ROOT / extra
