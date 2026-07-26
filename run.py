@@ -11,6 +11,14 @@ from requestcast.app import app
 
 
 def main() -> int:
+    if "--check-imports" in sys.argv:
+        import openpyxl  # noqa: F401
+        import pypdf  # noqa: F401
+        import waitress  # noqa: F401
+
+        print("Packaged imports succeeded.")
+        return 0
+
     settings = config.load()
     host = str(settings.get("bind_host") or config.DEFAULT_BIND_HOST)
     port = int(settings.get("bind_port") or config.DEFAULT_BIND_PORT)
@@ -25,9 +33,6 @@ def main() -> int:
 
     from waitress import serve
 
-    # Waitress's one-byte default can leave small response bodies buffered on
-    # Windows after the headers have already been sent.  A larger threshold
-    # lets the request finish before the channel flushes the complete response.
     serve(
         app,
         host=host,
