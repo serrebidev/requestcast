@@ -54,8 +54,27 @@ class LoopbackAccessTests(unittest.TestCase):
             ],
         )
 
-    def test_waitress_flushes_small_pages_immediately(self) -> None:
-        self.assertEqual(entrypoint.WAITRESS_SEND_BYTES, 1)
+    def test_windows_selects_werkzeug_instead_of_waitress(self) -> None:
+        with patch.object(entrypoint.os, "name", "nt"):
+            self.assertEqual(entrypoint.selected_http_backend(), "werkzeug-threaded")
+
+    def test_windows_werkzeug_server_binds_ipv4_loopback(self) -> None:
+        fake_server = MagicMock()
+        with (
+            patch.object(entrypoint.os, "name", "nt"),
+            patch("werkzeug.serving.make_server", return_value=fake_server) as make_server,
+            patch("requestcast.server.log_startup"),
+        ):
+            controller = entrypoint.create_http_server(DummyApp(), "localhost", 8797)
+        self.assertEqual(controller.backend, "werkzeug-threaded")
+        make_server.assert_called_once_with("127.0.0.1", 8797, unittest.mock.ANY, threaded=True)
+
+    def test_tcp_listener_is_detected_even_without_http_body(self) -> None:
+        connection = MagicMock()
+        with patch("run.socket.create_connection", return_value=connection) as create_connection:
+            self.assertTrue(entrypoint.tcp_port_is_open("localhost", 8797))
+        create_connection.assert_called_once_with(("127.0.0.1", 8797), timeout=0.5)
+        connection.close.assert_called_once_with()
 
     def test_legacy_secure_cookie_is_disabled_for_loopback_http(self) -> None:
         app = DummyApp()
