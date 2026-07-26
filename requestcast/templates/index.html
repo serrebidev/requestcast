@@ -1,12 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Find music to add</h1>
-<p>Search YouTube Music and Deezer without signing in, or paste a YouTube or Deezer URL. Added audio goes to the request-only library and never enters regular rotation. The highest-quality available audio stream is kept in its original supported format; unsupported containers are remuxed without re-encoding whenever possible.</p>
+<h1>Add music</h1>
+<p>Search by name or paste a YouTube or Deezer link. RequestCast keeps the best available audio and adds it to the request library.</p>
 
 <form method="get" class="search-form" role="search">
-  <label for="q">Keyword, artist, song, album, playlist, or YouTube/Deezer URL</label>
+  <label for="q">Search or paste a URL</label>
   <input id="q" name="q" type="search" value="{{ query }}" maxlength="2048" required autofocus>
-  <p class="hint">When you enter a URL, its source and result type are detected automatically.</p>
   <div class="field-row">
     <div>
       <label for="source">Search source</label>
@@ -30,7 +29,7 @@
 
 <section aria-labelledby="file-import-heading">
   <h2 id="file-import-heading">Upload a music list</h2>
-  <p>Upload a TXT, XLSX, or PDF list and the site will index its contents, find the music, and add it to your music library in the background. XLSX and table-style PDFs use the first two columns as artist and title. In TXT files, use one artist per line, <code>Artist - Title</code> for a specific song, or one supported YouTube or Deezer URL per line. Where Deezer has the same track, its version is used so the tags stay clean.</p>
+  <p>Upload TXT, XLSX, or PDF. Use <code>Artist - Title</code> for songs, or one artist or URL per line. Tables use the first two columns as artist and title.</p>
   <form method="post" action="{{ url_for('queue_file_import') }}" enctype="multipart/form-data" class="search-form">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}">
     <label for="file">Music list file</label>
@@ -43,9 +42,9 @@
       <option value="25">Top 25 tracks</option>
       <option value="10">Top 10 tracks</option>
     </select>
-    <p class="hint">This only affects lines that name an artist alone. Lines with both an artist and a title always add that one song. Taking every track from a long list of artists can queue thousands of downloads and run for a long time.</p>
-    <p class="hint">Maximum file size: 16 MB. A file may contain up to 10,000 unique entries.</p>
-    <button type="submit">Upload, index, and add all entries</button>
+    <p class="hint">Only affects artist-only lines. Large lists can queue thousands of tracks.</p>
+    <p class="hint">Limit: 16 MB and 10,000 unique entries.</p>
+    <button type="submit">Upload and add</button>
   </form>
 </section>
 
@@ -73,7 +72,7 @@
           <iframe title="Preview {{ item.title }}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" src="https://www.youtube-nocookie.com/embed/{{ item.preview }}?" allow="encrypted-media; picture-in-picture" allowfullscreen></iframe>
         </details>
       {% else %}
-        <p>No direct preview is available for this collection. Its tracks will be resolved individually.</p>
+        <p>No preview available.</p>
       {% endif %}
       <form method="post" action="{{ url_for('queue_download') }}">
         <input type="hidden" name="csrf" value="{{ csrf_token() }}">
@@ -93,6 +92,6 @@
   <ul class="jobs">
     {% for job in jobs %}<li><a href="{{ url_for('job_status', job_id=job['id']) }}">{{ job['label'] }}</a>: {{ job['state'] }}{% if job['total'] %}, {{ job['completed'] }} of {{ job['total'] }}{% endif %}</li>{% endfor %}
   </ul>
-  {% else %}<p>No downloads have been queued yet.</p>{% endif %}
+  {% else %}<p>No recent downloads.</p>{% endif %}
 </section>
 {% endblock %}
