@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -10,8 +11,10 @@ from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+os.environ.setdefault("REQUESTCAST_DISABLE_WORKER", "1")
 
 from requestcast import browser_shell, server
+from requestcast.app import app as flask_app
 
 
 class DummyApp:
@@ -59,6 +62,12 @@ class LoopbackAccessTests(unittest.TestCase):
         app = DummyApp()
         server.allow_loopback_http_sessions(app, "0.0.0.0")
         self.assertTrue(app.config["SESSION_COOKIE_SECURE"])
+
+    def test_real_flask_root_page_renders_requestcast_html(self) -> None:
+        response = flask_app.test_client().get("/", follow_redirects=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"RequestCast", response.data)
+        self.assertIn("text/html", response.content_type)
 
     @patch("requestcast.server.http.client.HTTPConnection")
     def test_health_check_requires_requestcast_response(self, connection_class) -> None:
