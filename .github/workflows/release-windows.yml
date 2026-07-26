@@ -121,7 +121,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Fixes the web interface hanging after RequestCast returned HTTP 200. The diagnostics showed that curl.exe and PowerShell reached /setup but timed out with zero body bytes while Waitress reported that Flask had generated the complete 4 KB page. RequestCast had overridden Waitress send_bytes to 18,000, causing small responses to remain buffered. This release restores immediate one-byte flushing and adds a packaged end-to-end test that starts RequestCast and must download the complete setup page before a Windows release can be published."
+          $notes = "Replaces Waitress with Werkzeug's threaded WSGI server on Windows 11. A second diagnostic bundle confirmed that RequestCast 1.3.8 used send_bytes=1 but clients still timed out while reading even the 16-byte health response. The new backend avoids the Waitress socket path entirely. RequestCast now also detects any process already holding its port before starting, so diagnostic mode cannot create a second server on port 8797. The packaged Windows build must still download the complete setup page before release."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
