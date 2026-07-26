@@ -6,7 +6,7 @@ import sys
 import threading
 import traceback
 
-from requestcast import config, server
+from requestcast import browser_shell, config, server
 from requestcast.app import app
 
 
@@ -35,7 +35,7 @@ def main() -> int:
     if server.requestcast_is_reachable(launch_url, timeout=0.75):
         print("RequestCast is already running. Opening the existing web interface.")
         if "--no-browser" not in sys.argv:
-            server.launch_browser_when_ready(launch_url, timeout=2.0)
+            browser_shell.launch_browser_when_ready(launch_url, timeout=2.0)
         return 0
 
     from waitress import create_server
@@ -77,7 +77,7 @@ def main() -> int:
     if not config.is_configured(settings):
         print("First run: the browser will open the setup page.")
     if "--no-browser" not in sys.argv:
-        server.launch_browser_when_ready(launch_url)
+        browser_shell.launch_browser_when_ready(launch_url)
 
     try:
         while server_thread.is_alive():
