@@ -143,33 +143,41 @@ class LoopbackAccessTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("HTTP 500", detail)
 
-    def test_windows_browser_launch_uses_clean_no_proxy_browser_first(self) -> None:
-        url = "http://127.0.0.1:8797/"
-        executable = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
-        with (
-            patch.object(browser_shell.os, "name", "nt"),
-            patch("requestcast.browser_shell._launch_clean_chromium", return_value=executable) as clean,
-            patch("requestcast.browser_shell._startfile") as startfile,
-            patch("requestcast.browser_shell._shell_execute") as shell_execute,
-            patch("requestcast.browser_shell.server.log_startup"),
-        ):
-            self.assertTrue(browser_shell.open_default_browser(url))
-            clean.assert_called_once_with(url)
-            startfile.assert_not_called()
-            shell_execute.assert_not_called()
-
-    def test_windows_browser_launch_falls_back_to_url_association(self) -> None:
+    def test_windows_browser_launch_uses_the_default_url_association(self) -> None:
+        """Windows opens the person's own browser. RequestCast never picks one itself."""
         url = "http://127.0.0.1:8797/"
         with (
             patch.object(browser_shell.os, "name", "nt"),
-            patch("requestcast.browser_shell._launch_clean_chromium", return_value=None),
             patch("requestcast.browser_shell._startfile", return_value=True) as startfile,
             patch("requestcast.browser_shell._shell_execute") as shell_execute,
+            patch("requestcast.browser_shell._rundll32_url") as rundll32,
             patch("requestcast.browser_shell.server.log_startup"),
         ):
             self.assertTrue(browser_shell.open_default_browser(url))
             startfile.assert_called_once_with(url)
             shell_execute.assert_not_called()
+            rundll32.assert_not_called()
+
+    def test_windows_browser_launch_falls_back_through_shell_handlers(self) -> None:
+        url = "http://127.0.0.1:8797/"
+        with (
+            patch.object(browser_shell.os, "name", "nt"),
+            patch("requestcast.browser_shell._startfile", return_value=False) as startfile,
+            patch("requestcast.browser_shell._shell_execute", return_value=True) as shell_execute,
+            patch("requestcast.browser_shell._rundll32_url") as rundll32,
+            patch("requestcast.browser_shell.server.log_startup"),
+        ):
+            self.assertTrue(browser_shell.open_default_browser(url))
+            startfile.assert_called_once_with(url)
+            shell_execute.assert_called_once_with(url)
+            rundll32.assert_not_called()
+
+    def test_no_browser_is_ever_launched_by_path(self) -> None:
+        """The old launcher started Edge against its own copied user-data directory."""
+        source = Path(browser_shell.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("--user-data-dir", source)
+        self.assertNotIn("msedge.exe", source)
+        self.assertFalse(hasattr(browser_shell, "_launch_clean_chromium"))
 
     def test_browser_launcher_checks_real_page_before_opening(self) -> None:
         with (
