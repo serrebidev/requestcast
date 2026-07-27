@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import time
 import traceback
 from typing import Any, Callable, Iterable
@@ -10,9 +11,79 @@ from werkzeug.serving import WSGIRequestHandler
 
 
 class RequestCastHTTP10RequestHandler(WSGIRequestHandler):
-    """Disable persistent HTTP connections and chunked transfer on Windows."""
+    """Write complete HTTP/1.0 responses directly to the socket on Windows.
+
+    Werkzeug 3.x drains the request socket after every WSGI response.  On some
+    Windows 11 systems a local network filter reports an empty request socket
+    as readable, causing ``self.rfile.read(10_000_000)`` to block while the
+    client waits for a response body that is already in the kernel send buffer.
+
+    This handler bypasses Werkzeug's ``run_wsgi`` entirely.  It calls the WSGI
+    app, buffers the full response (the middleware already does this), formats
+    a single HTTP/1.0 message, and sends it with one ``socket.sendall()`` call
+    followed by ``shutdown(SHUT_WR)``.  No speculative drain is performed.
+    """
 
     protocol_version = "HTTP/1.0"
+
+    def run_wsgi(self) -> None:
+        environ = self.make_environ()
+
+        status_holder: dict[str, Any] = {"status": None, "headers": [], "exc_info": None}
+        body_parts: list[bytes] = []
+
+        def start_response(status, headers, exc_info=None):
+            if status_holder["status"] is not None and exc_info is None:
+                raise AssertionError("start_response called twice without exc_info")
+            status_holder["status"] = status
+            status_holder["headers"] = list(headers)
+            status_holder["exc_info"] = exc_info
+
+            def write(data: bytes) -> None:
+                body_parts.append(bytes(data))
+
+            return write
+
+        response = None
+        try:
+            response = self.server.app(environ, start_response)
+            for chunk in response:
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise TypeError("WSGI response chunks must be bytes")
+                body_parts.append(bytes(chunk))
+        except Exception:
+            self.close_connection = True
+            raise
+        finally:
+            if response is not None and hasattr(response, "close"):
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+        status_line = status_holder["status"] or "500 Internal Server Error"
+        headers = status_holder["headers"]
+        body = b"".join(body_parts)
+
+        # Build the complete raw HTTP/1.0 response in one bytes object.
+        status_code = int(str(status_line).split(" ", 1)[0])
+        if status_code in {204, 304} or 100 <= status_code < 200:
+            body = b""
+
+        raw = f"HTTP/1.0 {status_line}\r\n".encode()
+        for name, value in headers:
+            raw += f"{name}: {value}\r\n".encode()
+        if not any(name.casefold() == "connection" for name, _ in headers):
+            raw += b"Connection: close\r\n"
+        raw += b"\r\n"
+        raw += body
+
+        self.close_connection = True
+        try:
+            self.connection.sendall(raw)
+            self.connection.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
 
 
 class BufferedClosingMiddleware:

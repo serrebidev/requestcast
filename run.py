@@ -59,7 +59,7 @@ def show_startup_error(message: str) -> None:
 def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
     """Create the dependable platform-specific HTTP server."""
     if os.name == "nt":
-        from werkzeug.serving import WSGIRequestHandler, make_server
+        from werkzeug.serving import make_server
 
         if server.is_loopback_host(host):
             bind_host = "127.0.0.1"
@@ -68,8 +68,13 @@ def create_http_server(app: Any, host: str, port: int) -> HttpServerController:
         else:
             bind_host = host
 
-        WSGIRequestHandler.protocol_version = RequestCastHTTP10RequestHandler.protocol_version
-        instance = make_server(bind_host, port, app, threaded=True)
+        instance = make_server(
+            bind_host,
+            port,
+            app,
+            threaded=True,
+            request_handler=RequestCastHTTP10RequestHandler,
+        )
 
         def close_werkzeug() -> None:
             instance.shutdown()

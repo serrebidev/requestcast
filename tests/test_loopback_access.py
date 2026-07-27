@@ -16,6 +16,7 @@ os.environ.setdefault("REQUESTCAST_DISABLE_WORKER", "1")
 import run as entrypoint
 from requestcast import browser_shell, server
 from requestcast.app import app as flask_app
+from requestcast.http_framing import RequestCastHTTP10RequestHandler
 
 
 class DummyApp:
@@ -67,7 +68,13 @@ class LoopbackAccessTests(unittest.TestCase):
         ):
             controller = entrypoint.create_http_server(DummyApp(), "localhost", 8797)
         self.assertEqual(controller.backend, "werkzeug-threaded")
-        make_server.assert_called_once_with("127.0.0.1", 8797, unittest.mock.ANY, threaded=True)
+        make_server.assert_called_once_with(
+            "127.0.0.1",
+            8797,
+            unittest.mock.ANY,
+            threaded=True,
+            request_handler=RequestCastHTTP10RequestHandler,
+        )
 
     def test_tcp_listener_is_detected_even_without_http_body(self) -> None:
         connection = MagicMock()

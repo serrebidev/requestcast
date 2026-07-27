@@ -125,7 +125,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Fixes Windows clients receiving RequestCast status codes but waiting forever for the response to finish. RequestCast now fully buffers each local response, removes chunked transfer encoding, calculates an exact Content-Length, sends it as HTTP/1.0, and forces Connection: close. This avoids persistent-loopback and response-framing problems caused by Windows network filters. The packaged executable test now rejects the release unless /setup is received completely with HTTP/1.0, the exact byte length, no Transfer-Encoding header, and a closed connection."
+          $notes = "Fixes RequestCast on Windows 11 where localhost connections received HTTP headers but the page body never arrived. The root cause was Werkzeug's post-response request-socket drain blocking on an empty-but-readably-reported loopback socket. RequestCast now bypasses that drain entirely: the custom request handler writes the complete HTTP/1.0 response in a single socket.sendall() call, immediately shuts down the write side, and closes the connection. Responses remain fully buffered with exact Content-Length and Connection: close."
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
