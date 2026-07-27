@@ -148,7 +148,11 @@ def main() -> int:
 
     server.allow_loopback_http_sessions(app, host)
     if not getattr(app, "_requestcast_http_framing_wrapped", False):
-        app.wsgi_app = BufferedClosingMiddleware(app.wsgi_app, diagnostics.log_http)
+        app.wsgi_app = BufferedClosingMiddleware(
+            app.wsgi_app,
+            diagnostics.log_http,
+            add_connection_close=os.name != "nt",
+        )
         app._requestcast_http_framing_wrapped = True
 
     print("RequestCast web interface:")
