@@ -1,0 +1,34 @@
+Your default browser was asked to open http://127.0.0.1:8797/.
+............EE..
+======================================================================
+ERROR: test_windows_browser_launch_falls_back_to_url_association (__main__.LoopbackAccessTests.test_windows_browser_launch_falls_back_to_url_association)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\a\requestcast\requestcast\tests\test_loopback_access.py", line 165, in test_windows_browser_launch_falls_back_to_url_association
+    patch("requestcast.browser_shell._launch_clean_chromium", return_value=None),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\unittest\mock.py", line 1467, in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+  File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\unittest\mock.py", line 1437, in get_original
+    raise AttributeError(
+AttributeError: <module 'requestcast.browser_shell' from 'D:\\a\\requestcast\\requestcast\\requestcast\\browser_shell.py'> does not have the attribute '_launch_clean_chromium'
+
+======================================================================
+ERROR: test_windows_browser_launch_uses_clean_no_proxy_browser_first (__main__.LoopbackAccessTests.test_windows_browser_launch_uses_clean_no_proxy_browser_first)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\a\requestcast\requestcast\tests\test_loopback_access.py", line 151, in test_windows_browser_launch_uses_clean_no_proxy_browser_first
+    patch("requestcast.browser_shell._launch_clean_chromium", return_value=executable) as clean,
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\unittest\mock.py", line 1467, in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+  File "C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\unittest\mock.py", line 1437, in get_original
+    raise AttributeError(
+AttributeError: <module 'requestcast.browser_shell' from 'D:\\a\\requestcast\\requestcast\\requestcast\\browser_shell.py'> does not have the attribute '_launch_clean_chromium'
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.145s
+
+FAILED (errors=2)
