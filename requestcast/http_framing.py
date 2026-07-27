@@ -16,21 +16,23 @@ class RequestCastHTTP10RequestHandler(WSGIRequestHandler):
 
 
 class BufferedClosingMiddleware:
-    """Buffer each response and send it with an exact length and a closed connection.
+    """Buffer each response and send it with an exact byte length.
 
     RequestCast is a local, single-user application whose HTML and JSON responses are
     small. Fully buffering them avoids client hangs caused by ambiguous end-of-body
-    framing, persistent loopback connections, or network-filter software that mishandles
-    chunked transfer encoding.
+    framing or network-filter software that mishandles chunked transfer encoding.
     """
 
     def __init__(
         self,
         application: Callable[..., Iterable[bytes]],
         log: Callable[[str], None] | None = None,
+        *,
+        add_connection_close: bool = True,
     ) -> None:
         self.application = application
         self.log = log or (lambda _message: None)
+        self.add_connection_close = add_connection_close
 
     def __call__(
         self,
@@ -123,12 +125,15 @@ class BufferedClosingMiddleware:
             content_length = str(len(body))
 
         headers.append(("Content-Length", content_length))
-        headers.append(("Connection", "close"))
+        if self.add_connection_close:
+            headers.append(("Connection", "close"))
         start_response(status, headers, captured["exc_info"])
 
+        connection_detail = "middleware-close" if self.add_connection_close else "server-close"
         self.log(
             f"RESPONSE finish method={method} path={path!r} status={status!r} "
-            f"bytes={len(body)} content_length={content_length!r} connection='close' "
+            f"bytes={len(body)} content_length={content_length!r} "
+            f"connection={connection_detail!r} "
             f"elapsed_ms={(time.monotonic() - started) * 1000:.1f}"
         )
         return [body]
