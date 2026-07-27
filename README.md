@@ -96,8 +96,8 @@ REQUESTCAST_DIAGNOSTICS=1       # optional; collects a support bundle, off by de
 ```
 
 Setting `REQUESTCAST_AZURACAST_API_KEY` turns the AzuraCast integration on. Serve it with
-gunicorn or waitress behind nginx, and give it a generous request timeout — indexing a
-7,000-row PDF takes about twenty seconds and happens inside the upload request.
+gunicorn or waitress behind nginx, and give it a generous request timeout and body size —
+indexing happens inside the upload request, and uploads are accepted up to 64 MB.
 
 `systemd` unit and nginx examples are in [`docs/deployment.md`](docs/deployment.md).
 

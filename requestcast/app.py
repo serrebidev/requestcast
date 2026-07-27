@@ -41,8 +41,16 @@ from . import config, deezer, permissions, tools
 
 HTTP_TIMEOUT = (10, 30)
 MAX_COLLECTION_TRACKS = 100
-MAX_IMPORT_ENTRIES = 10_000
-MAX_IMPORT_TRACKS = 25_000
+# Whole-library lists are normal, so the ceilings are set by what parsing actually costs,
+# not by a cautious round number. On a 2020-era machine 250,000 rows takes about a second
+# from TXT, eleven seconds from XLSX, and a PDF page costs roughly three milliseconds.
+MAX_IMPORT_ENTRIES = 250_000
+MAX_IMPORT_TRACKS = 250_000
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+# Raw rows tolerated before deduplication, so a file far over the limit fails fast
+# instead of being read into memory in full first.
+MAX_RAW_IMPORT_ENTRIES = MAX_IMPORT_ENTRIES * 2
+MAX_PDF_PAGES = 5_000
 # Artist-only import lines take the artist's whole catalogue unless the uploader picks a cap.
 IMPORT_ARTIST_TRACK_CHOICES = {"all": 0, "100": 100, "50": 50, "25": 25, "10": 10}
 MAX_ARTIST_ALBUMS = 300
@@ -70,7 +78,7 @@ app.config.update(
     SESSION_COOKIE_NAME="requestcast_session",
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Strict",
-    MAX_CONTENT_LENGTH=16 * 1024 * 1024,
+    MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
 )
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
@@ -662,8 +670,17 @@ def resolve_media_url(value: str) -> dict[str, Any]:
 
 
 def recent_jobs(limit: int = 12) -> list[sqlite3.Row]:
+    """List recent jobs without reading their payloads.
+
+    A whole-library import stores every indexed entry in its payload, so ``SELECT *``
+    here would read tens of megabytes per job just to draw a list of links.
+    """
     with db_connect() as con:
-        return con.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return con.execute(
+            "SELECT id, state, label, total, completed FROM jobs "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
 
 
 @app.route("/")
@@ -1007,17 +1024,9 @@ def parse_txt_import(stream: Any) -> list[dict[str, str]]:
     raw = stream.read()
     if not isinstance(raw, bytes):
         raw = str(raw).encode("utf-8")
-    if len(raw) > 16 * 1024 * 1024:
+    if len(raw) > MAX_UPLOAD_BYTES:
         raise RuntimeError("The text file is too large.")
-    text = None
-    for encoding in ("utf-8-sig", "utf-16", "cp1252"):
-        try:
-            text = raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    if text is None:
-        raise RuntimeError("The text encoding could not be read.")
+    text = decode_import_text(raw, "text file")
     entries = []
     for line in text.splitlines():
         line = line.strip()
@@ -1027,6 +1036,8 @@ def parse_txt_import(stream: Any) -> list[dict[str, str]]:
         entry = import_entry_from_values(values[0], values[1] if len(values) > 1 else None)
         if entry:
             entries.append(entry)
+        if len(entries) > MAX_RAW_IMPORT_ENTRIES:
+            raise RuntimeError(f"Files may contain at most {MAX_IMPORT_ENTRIES:,} entries.")
     return dedupe_import_entries(entries)
 
 
@@ -1039,7 +1050,7 @@ def validate_xlsx_archive(stream: Any) -> None:
         raise RuntimeError("The XLSX file is damaged or is not a real Excel workbook.") from exc
     finally:
         stream.seek(0)
-    if expanded_size > 128 * 1024 * 1024:
+    if expanded_size > 8 * MAX_UPLOAD_BYTES:
         raise RuntimeError("The expanded XLSX workbook is too large.")
 
 
@@ -1055,7 +1066,7 @@ def parse_xlsx_import(stream: Any) -> list[dict[str, str]]:
                 entry = import_entry_from_values(first, second)
                 if entry:
                     entries.append(entry)
-                if len(entries) > MAX_IMPORT_ENTRIES * 2:
+                if len(entries) > MAX_RAW_IMPORT_ENTRIES:
                     raise RuntimeError(f"Files may contain at most {MAX_IMPORT_ENTRIES:,} entries.")
     finally:
         workbook.close()
@@ -1065,8 +1076,8 @@ def parse_xlsx_import(stream: Any) -> list[dict[str, str]]:
 def parse_pdf_import(stream: Any) -> list[dict[str, str]]:
     stream.seek(0)
     reader = PdfReader(stream)
-    if len(reader.pages) > 500:
-        raise RuntimeError("PDF files may contain at most 500 pages.")
+    if len(reader.pages) > MAX_PDF_PAGES:
+        raise RuntimeError(f"PDF files may contain at most {MAX_PDF_PAGES:,} pages.")
     entries: list[dict[str, str]] = []
     for page in reader.pages:
         text = page.extract_text(extraction_mode="layout") or ""
@@ -1078,7 +1089,7 @@ def parse_pdf_import(stream: Any) -> list[dict[str, str]]:
             entry = import_entry_from_values(columns[0], columns[1] if len(columns) > 1 else None)
             if entry:
                 entries.append(entry)
-            if len(entries) > MAX_IMPORT_ENTRIES * 2:
+            if len(entries) > MAX_RAW_IMPORT_ENTRIES:
                 raise RuntimeError(f"Files may contain at most {MAX_IMPORT_ENTRIES:,} entries.")
     return dedupe_import_entries(entries)
 
@@ -1088,7 +1099,7 @@ def read_import_bytes(stream: Any, description: str) -> bytes:
     raw = stream.read()
     if not isinstance(raw, bytes):
         raw = str(raw).encode("utf-8")
-    if len(raw) > 16 * 1024 * 1024:
+    if len(raw) > MAX_UPLOAD_BYTES:
         raise RuntimeError(f"The {description} is too large.")
     return raw
 

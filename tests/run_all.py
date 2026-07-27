@@ -23,6 +23,7 @@ TESTS = (
     "test_download_permissions.py",
     "test_first_run.py",
     "test_job_history.py",
+    "test_large_import.py",
     "test_legacy_env.py",
     "test_playlist_import.py",
     "test_preferences.py",

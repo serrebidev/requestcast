@@ -1,32 +1,20 @@
-Uses your own default browser, stops wasting disk space, and lets you choose what to download.
+Whole-library lists now fit. The upload limits were far too small.
 
-**Your default browser, and no browser downloads.** Earlier builds launched a separate
-Chromium window against a private user-data directory, which copied a whole Microsoft Edge
-profile — frequently hundreds of megabytes — into RequestCast's own folder. That is gone.
-RequestCast now hands the address to Windows, and whichever browser you have set as your
-default opens it. On startup it also deletes any browser profile folder an older version
-left behind, so the space comes back.
+**250,000 entries per file, up from 10,000.** Plenty of people keep lists longer than ten
+thousand rows, and there was no good reason for the old ceiling — indexing was never the
+slow part. On an ordinary machine, 250,000 rows takes about a second to index from a TXT
+file and about eleven seconds from an XLSX workbook, and a PDF page costs roughly three
+milliseconds. The new limits are set by what that work actually costs.
 
-**Diagnostics are off by default.** The full support bundle used to write a request log and
-collect tens of megabytes of Windows networking evidence every time the program started. It
-is now a preference, off unless you turn it on: tick it under Preferences, start with
-`RequestCast.exe --diagnostics`, or set `REQUESTCAST_DIAGNOSTICS=1`. `--diagnose` still
-collects one bundle on demand when someone asks you for it.
+**Bigger files are accepted.** Uploads may now be 64 MB rather than 16 MB, PDFs may run to
+5,000 pages rather than 500, and an import may resolve up to 250,000 tracks rather than
+25,000. A file past the ceiling is still refused, and now fails as soon as it goes over
+instead of being read into memory in full first.
 
-**Downloads are readable by everyone.** Finished files kept the private permissions of the
-temporary folder they were built in, so they had to be fixed by hand every time. RequestCast
-now resets each finished file, and the download folder itself, to be readable by every
-account on the machine.
+**The main page stays fast.** A large import stores every indexed entry with its job, so
+listing recent downloads no longer reads those payloads back — it reads only the few
+columns it shows. Without that, drawing the home page after a few whole-library imports
+would have meant loading hundreds of megabytes.
 
-**Clear your download history.** Clear finished downloads, or the whole history, from the
-main page, and remove a single entry from its status page. Downloads still in progress are
-kept, and no music files are ever deleted.
-
-**Pick what you want from an artist or channel.** Enter an artist, or paste a YouTube
-channel, and open it to see its releases, albums, singles, songs, and videos. Take all of it
-with one button, or tick only the parts you want.
-
-**Upload the playlists you already have.** M3U, M3U8, PLS, XSPF, WPL, ASX, CUE, and
-foobar2000 FPL are read alongside TXT, XLSX, and PDF lists. RequestCast reads the artist and
-title each playlist names and fetches those tracks, so the original files do not need to be
-present on this machine.
+If you run RequestCast behind nginx, raise `client_max_body_size` to `64m` and keep a
+generous `proxy_read_timeout`, since indexing happens inside the upload request.

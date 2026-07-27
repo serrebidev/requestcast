@@ -98,8 +98,12 @@ WantedBy=multi-user.target
 **Use one worker.** The download queue is a thread inside the process, and a second worker
 would compete for the same jobs.
 
-**The 300 second timeout matters.** Indexing a large PDF happens inside the upload request and
-takes about twenty seconds for 7,000 rows; the default 30 second timeout kills it.
+**The 300 second timeout matters.** Indexing happens inside the upload request. A list of
+250,000 rows — the maximum — takes about a second from TXT and about eleven seconds from
+XLSX, and a dense PDF is slower still; the default 30 second timeout can kill it.
+
+**Raise nginx's upload limit.** RequestCast accepts files up to 64 MB, so nginx needs
+`client_max_body_size 64m;` or it rejects large lists before they reach the program.
 
 ```bash
 systemctl daemon-reload
@@ -113,7 +117,7 @@ server {
     listen 443 ssl http2;
     server_name requestcast.example.com;
 
-    client_max_body_size 20m;   # uploaded lists can be several megabytes
+    client_max_body_size 64m;   # matches RequestCast's own upload ceiling
 
     location / {
         proxy_pass http://127.0.0.1:8797;
