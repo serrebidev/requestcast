@@ -85,20 +85,18 @@ jobs:
           $log = "release-windows-test-output.txt"
           python -m compileall -q requestcast tests *> $log
           $exitCode = $LASTEXITCODE
-          if ($exitCode -eq 0) {
-            python tests/test_loopback_access.py *>> $log
-            $exitCode = $LASTEXITCODE
-          }
-          if ($exitCode -eq 0) {
-            python tests/test_http_framing.py *>> $log
-            $exitCode = $LASTEXITCODE
-          }
-          if ($exitCode -eq 0) {
-            python tests/test_diagnostics.py *>> $log
-            $exitCode = $LASTEXITCODE
-          }
-          if ($exitCode -eq 0) {
-            python tests/test_youtube_collections.py *>> $log
+          $suite = @(
+            'tests/test_loopback_access.py',
+            'tests/test_http_framing.py',
+            'tests/test_diagnostics.py',
+            'tests/test_youtube_collections.py',
+            'tests/test_browser_and_diagnostics.py',
+            'tests/test_download_permissions.py',
+            'tests/test_playlist_import.py'
+          )
+          foreach ($test in $suite) {
+            if ($exitCode -ne 0) { break }
+            python $test *>> $log
             $exitCode = $LASTEXITCODE
           }
           Get-Content $log
@@ -125,14 +123,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Fixes RequestCast on Windows 11 where localhost connections received HTTP headers but the page body never arrived. The root cause was Werkzeug's post-response request-socket drain blocking on an empty-but-readably-reported loopback socket. RequestCast now bypasses that drain entirely: the custom request handler writes the complete HTTP/1.0 response in a single socket.sendall() call, immediately shuts down the write side, and closes the connection. Responses remain fully buffered with exact Content-Length and Connection: close."
+          $notes = "docs/release-notes.md"
           gh release view "$env:RELEASE_TAG" *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes "$notes"
+            gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes-file "$notes"
             gh release upload "$env:RELEASE_TAG" "$env:RELEASE_ZIP" --clobber
           }
           else {
-            gh release create "$env:RELEASE_TAG" "$env:RELEASE_ZIP" --target "$env:SOURCE_SHA" --title "$env:RELEASE_TITLE" --notes "$notes"
+            gh release create "$env:RELEASE_TAG" "$env:RELEASE_ZIP" --target "$env:SOURCE_SHA" --title "$env:RELEASE_TITLE" --notes-file "$notes"
           }
 
       - name: Upload workflow artifact

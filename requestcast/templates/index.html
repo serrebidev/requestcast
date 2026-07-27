@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Add music</h1>
-<p>Search by name or paste a YouTube or Deezer link. RequestCast keeps the best available audio and adds it to the request library.</p>
+<p>Search by name or paste a YouTube or Deezer link. RequestCast keeps the best available audio and adds it to the request library. Artists and YouTube channels can be opened to pick individual releases, albums, or videos.</p>
 
 <form method="get" class="search-form" role="search">
   <label for="q">Search or paste a URL</label>
@@ -28,12 +28,13 @@
 </form>
 
 <section aria-labelledby="file-import-heading">
-  <h2 id="file-import-heading">Upload a music list</h2>
+  <h2 id="file-import-heading">Upload a music list or playlist</h2>
   <p>Upload TXT, XLSX, or PDF. Use <code>Artist - Title</code> for songs, or one artist or URL per line. Tables use the first two columns as artist and title.</p>
+  <p>Existing playlists work too: M3U, M3U8, PLS, XSPF, WPL, ASX, CUE, and foobar2000 FPL. RequestCast reads the artist and title each playlist names and fetches those tracks; it does not need the original files.</p>
   <form method="post" action="{{ url_for('queue_file_import') }}" enctype="multipart/form-data" class="search-form">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-    <label for="file">Music list file</label>
-    <input id="file" name="file" type="file" accept=".txt,.xlsx,.pdf,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf" required>
+    <label for="file">Music list or playlist file</label>
+    <input id="file" name="file" type="file" accept=".txt,.xlsx,.pdf,.m3u,.m3u8,.pls,.xspf,.wpl,.asx,.cue,.fpl,.fb2k-playlist,text/plain,audio/x-mpegurl,audio/x-scpls,application/xspf+xml,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/pdf" required>
     <label for="artist_tracks">Tracks to take from each artist-only line</label>
     <select id="artist_tracks" name="artist_tracks">
       <option value="all" selected>Every track in the artist's catalogue</option>
@@ -80,6 +81,9 @@
         <button type="submit" name="action" value="add">{% if item.kind in ['song','video'] %}Add this track{% elif item.kind == 'artist' %}Add top tracks from this artist{% else %}Add this {{ item.kind }}{% endif %}</button>
         <button type="submit" name="action" value="add_request">{% if item.kind in ['song','video'] %}Add and request this track{% else %}Add and request the first track{% endif %}</button>
       </form>
+      {% if item.kind in ['artist','channel'] %}
+      <p><a href="{{ url_for('browse_artist', token=item.token) }}">Choose which releases, albums, or videos to download</a></p>
+      {% endif %}
     </li>
   {% endfor %}
   </ol>
@@ -92,6 +96,12 @@
   <ul class="jobs">
     {% for job in jobs %}<li><a href="{{ url_for('job_status', job_id=job['id']) }}">{{ job['label'] }}</a>: {{ job['state'] }}{% if job['total'] %}, {{ job['completed'] }} of {{ job['total'] }}{% endif %}</li>{% endfor %}
   </ul>
+  <form method="post" action="{{ url_for('clear_job_history') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <button type="submit" name="scope" value="finished">Clear finished downloads</button>
+    <button type="submit" name="scope" value="all" class="secondary">Clear the whole download history</button>
+  </form>
+  <p class="hint">Clearing removes history entries only. Downloads still in progress are kept, and no music files are deleted.</p>
   {% else %}<p>No recent downloads.</p>{% endif %}
 </section>
 {% endblock %}

@@ -101,6 +101,16 @@
          inputmode="numeric">
   <p class="hint">Address and port changes require a restart.</p>
 
+  <h2>Diagnostics</h2>
+  <label for="diagnostics_enabled">
+    <input id="diagnostics_enabled" name="diagnostics_enabled" type="checkbox" value="1"
+           {% if settings.diagnostics_enabled %}checked{% endif %}>
+    Collect a support bundle when RequestCast starts
+  </label>
+  <p class="hint">Off by default. Turn this on only when someone asks for a diagnostic ZIP:
+    it writes a request log and tens of megabytes of Windows networking evidence next to
+    the program. Takes effect at the next restart.</p>
+
   <button type="submit">{% if first_run %}Save and start{% else %}Save preferences{% endif %}</button>
 </form>
 

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}{{ item.title }} — RequestCast{% endblock %}
+{% block content %}
+<h1>{{ item.title }}</h1>
+<p>
+  {% if item.kind == 'channel' %}Everything this YouTube channel has published.
+  {% else %}Everything {{ item.artist or item.title }} has released.{% endif %}
+  Take all of it, or tick only the releases, albums, and videos you want.
+</p>
+
+<form method="post" action="{{ url_for('queue_browse_selection') }}">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <input type="hidden" name="token" value="{{ token }}">
+
+  <p>
+    <button type="submit" name="scope" value="everything">Download everything</button>
+    <button type="submit" name="scope" value="selected" class="secondary">Download the ticked items</button>
+  </p>
+
+  {% if not sections %}
+  <p>Nothing could be listed for this artist. Return to <a href="{{ url_for('index') }}">search</a> and add the artist directly.</p>
+  {% endif %}
+
+  {% for section in sections %}
+  <fieldset>
+    <legend>{{ section['heading'] }} ({{ section['items']|length }})</legend>
+    {% if section['note'] %}<p class="hint">{{ section['note'] }}</p>{% endif %}
+    <ul class="results">
+      {% for entry in section['items'] %}
+      <li>
+        <label for="pick-{{ loop.index }}-{{ section['heading']|replace(' ', '-')|lower }}">
+          <input type="checkbox" name="select" value="{{ entry.token }}"
+                 id="pick-{{ loop.index }}-{{ section['heading']|replace(' ', '-')|lower }}">
+          {{ entry.label }}{% if entry.detail %} — {{ entry.detail }}{% endif %}
+        </label>
+      </li>
+      {% endfor %}
+    </ul>
+  </fieldset>
+  {% endfor %}
+
+  {% if sections %}
+  <p>
+    <button type="submit" name="scope" value="selected">Download the ticked items</button>
+    <button type="submit" name="scope" value="everything" class="secondary">Download everything</button>
+  </p>
+  {% endif %}
+</form>
+
+<p><a href="{{ url_for('index') }}">Return to search</a></p>
+{% endblock %}

@@ -51,6 +51,8 @@ FIELDS: dict[str, Any] = {
     "ffmpeg_path": "",
     "ffprobe_path": "",
     "deezer_arl": "",
+    # Diagnostics write a large support bundle to disk, so they stay off until asked for.
+    "diagnostics_enabled": False,
 }
 
 # Environment names are checked in order, so the modern name wins over the legacy one.
@@ -75,6 +77,7 @@ ENVIRONMENT_NAMES: dict[str, tuple[str, ...]] = {
     "ffmpeg_path": ("REQUESTCAST_FFMPEG",),
     "ffprobe_path": ("REQUESTCAST_FFPROBE",),
     "deezer_arl": ("REQUESTCAST_DEEZER_ARL", "ADDTO_DEEZER_ARL"),
+    "diagnostics_enabled": ("REQUESTCAST_DIAGNOSTICS",),
 }
 
 TRUTHY = {"1", "true", "yes", "on"}

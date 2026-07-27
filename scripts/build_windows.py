@@ -244,16 +244,20 @@ def main() -> int:
     )
     diagnostic_readme = target / "DIAGNOSTICS.txt"
     diagnostic_readme.write_text(
-        "RequestCast automatically creates RequestCast-Diagnostics.zip after startup.\n\n"
-        "To collect a new bundle manually, run Collect RequestCast Diagnostics.cmd. "
-        "The collector starts a temporary local server when RequestCast is not already running.\n\n"
+        "RequestCast does not collect diagnostics unless you ask it to.\n\n"
+        "To collect a bundle, run Collect RequestCast Diagnostics.cmd. The collector starts a "
+        "temporary local server when RequestCast is not already running, writes "
+        "RequestCast-Diagnostics.zip in this folder, and exits.\n\n"
+        "To collect one on every start instead, tick the diagnostics box in Preferences, or run "
+        "RequestCast.exe --diagnostics. That writes a request log and tens of megabytes of "
+        "networking evidence each time, so leave it off unless you have been asked for it.\n\n"
         "Send the complete ZIP file. It excludes passwords, hashes, salts, API keys, session secrets, "
         "cookies, form contents, and Deezer ARL values.\n",
         encoding="utf-8",
     )
 
     print(f"\nBuilt {target}")
-    print(f"Run {target / (NAME + '.exe')} and the setup page opens in your browser.")
+    print(f"Run {target / (NAME + '.exe')} and the setup page opens in your default browser.")
     print(f"Run {diagnostic_launcher} to create a full support ZIP.")
     return 0
 

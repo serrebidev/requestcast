@@ -19,7 +19,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+from xml.etree import ElementTree
 
 import requests
 from flask import Flask, abort, flash, redirect, render_template, request, session, url_for
@@ -35,7 +36,7 @@ from pypdf import PdfReader
 from werkzeug.middleware.proxy_fix import ProxyFix
 from ytmusicapi import YTMusic
 
-from . import config, deezer, tools
+from . import config, deezer, permissions, tools
 
 
 HTTP_TIMEOUT = (10, 30)
@@ -45,7 +46,19 @@ MAX_IMPORT_TRACKS = 25_000
 # Artist-only import lines take the artist's whole catalogue unless the uploader picks a cap.
 IMPORT_ARTIST_TRACK_CHOICES = {"all": 0, "100": 100, "50": 50, "25": 25, "10": 10}
 MAX_ARTIST_ALBUMS = 300
-IMPORT_EXTENSIONS = {".txt", ".xlsx", ".pdf"}
+# How many releases or videos one browse page offers per section.
+MAX_BROWSE_ITEMS = 200
+BROWSABLE_KINDS = {"artist", "channel"}
+# Playlists people already have. A playlist names files this machine may not hold, so
+# each entry is treated as a request for that artist and title, not as a local file.
+PLAYLIST_EXTENSIONS = {
+    ".m3u", ".m3u8", ".pls", ".xspf", ".wpl", ".asx", ".cue", ".fpl", ".fb2k-playlist",
+}
+IMPORT_EXTENSIONS = {".txt", ".xlsx", ".pdf"} | PLAYLIST_EXTENSIONS
+AUDIO_FILE_EXTENSIONS = {
+    ".aac", ".aif", ".aiff", ".ape", ".flac", ".m4a", ".mp2", ".mp3", ".mp4", ".oga",
+    ".ogg", ".opus", ".wav", ".wma", ".wv",
+}
 AZURACAST_AUDIO_EXTENSIONS = {
     ".aac", ".aif", ".aiff", ".flac", ".m4a", ".mp2", ".mp3", ".mp4",
     ".oga", ".ogg", ".opus", ".wav", ".wma",
@@ -709,14 +722,90 @@ def queue_download():
         abort(400)
     payload["_request_after_add"] = action == "add_request"
     payload["_request_ip"] = client_ip()
+    job_id = queue_job(
+        f"{payload.get('title', 'Untitled')} ({payload.get('source')})",
+        "Waiting for the downloader",
+        payload,
+    )
+    return redirect(url_for("job_status", job_id=job_id))
+
+
+def queue_job(label: str, detail: str, payload: dict[str, Any]) -> str:
+    """Add one job to the queue and return its identifier."""
     job_id = uuid.uuid4().hex
     now = int(time.time())
-    label = f"{payload.get('title', 'Untitled')} ({payload.get('source')})"
     with db_connect() as con:
         con.execute(
             "INSERT INTO jobs (id,state,label,detail,payload,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-            (job_id, "queued", label, "Waiting for the downloader", json.dumps(payload), now, now),
+            (job_id, "queued", label, detail, json.dumps(payload), now, now),
         )
+    return job_id
+
+
+@app.get("/browse")
+def browse_artist():
+    """Show one artist's or channel's releases so a person can pick from them."""
+    token = request.args.get("token", "")
+    try:
+        item = signer.loads(token, max_age=86400)
+    except (BadSignature, SignatureExpired):
+        flash("That result expired. Search again and retry.")
+        return redirect(url_for("index"))
+    if item.get("kind") not in BROWSABLE_KINDS:
+        flash("Only artists and YouTube channels can be opened this way.")
+        return redirect(url_for("index"))
+    if not rate_allowed("browse", client_ip(), 20, 300):
+        abort(429, "Too many artist pages were opened. Please wait a few minutes.")
+    try:
+        sections = browse_sections(item)
+    except Exception as exc:
+        flash(f"That artist could not be opened: {exc}")
+        return redirect(url_for("index"))
+    return render_template("browse.html", item=item, sections=sections, token=token)
+
+
+@app.post("/browse")
+def queue_browse_selection():
+    """Queue everything from an artist, or only the parts that were ticked."""
+    require_csrf()
+    if not rate_allowed("download", client_ip(), 20, 300):
+        abort(429, "Too many downloads were queued. Please wait a few minutes.")
+    token = request.form.get("token", "")
+    try:
+        item = signer.loads(token, max_age=86400)
+    except (BadSignature, SignatureExpired):
+        flash("That result expired. Search again and retry.")
+        return redirect(url_for("index"))
+    if item.get("kind") not in BROWSABLE_KINDS:
+        abort(400)
+    scope = request.form.get("scope", "selected")
+    if scope not in {"selected", "everything"}:
+        abort(400)
+    try:
+        sections = browse_sections(item)
+    except Exception as exc:
+        flash(f"That artist could not be opened: {exc}")
+        return redirect(url_for("index"))
+    if scope == "everything":
+        chosen = [entry["token"] for section in sections for entry in section["items"]]
+    else:
+        chosen = request.form.getlist("select")
+    payloads = selection_payloads(sections, chosen)
+    if not payloads:
+        flash("Tick at least one release, album, or video, or choose Download everything.")
+        return redirect(url_for("browse_artist", token=token))
+
+    name = clean_text(str(item.get("artist") or item.get("title") or "")) or "this artist"
+    payload = {
+        "source": "selection", "kind": "selection", "title": name,
+        "items": payloads, "_request_after_add": False, "_request_ip": client_ip(),
+    }
+    what = "everything" if scope == "everything" else f"{len(payloads)} selected item(s)"
+    job_id = queue_job(
+        f"{name} ({what})",
+        f"Queued {len(payloads)} item(s); waiting for the downloader",
+        payload,
+    )
     return redirect(url_for("job_status", job_id=job_id))
 
 
@@ -729,10 +818,13 @@ def queue_file_import():
     filename = Path(str(uploaded.filename or "")).name if uploaded else ""
     extension = Path(filename).suffix.lower()
     if not uploaded or not filename:
-        flash("Choose a TXT, XLSX, or PDF file to upload.")
+        flash("Choose a list or playlist file to upload.")
         return redirect(url_for("index"))
     if extension not in IMPORT_EXTENSIONS:
-        flash("That file type is not supported. Upload a TXT, XLSX, or PDF file.")
+        flash(
+            "That file type is not supported. Upload a TXT, XLSX, or PDF list, or an "
+            "M3U, M3U8, PLS, XSPF, WPL, ASX, CUE, or foobar2000 FPL playlist."
+        )
         return redirect(url_for("index"))
     try:
         entries = parse_import_file(filename, uploaded.stream)
@@ -740,7 +832,7 @@ def queue_file_import():
         flash(f"The file could not be indexed: {exc}")
         return redirect(url_for("index"))
     if not entries:
-        flash("No artist, title, or supported music URL entries were found in that file.")
+        flash("No artist, title, track, or supported music URL entries were found in that file.")
         return redirect(url_for("index"))
     choice = request.form.get("artist_tracks", "all")
     if choice not in IMPORT_ARTIST_TRACK_CHOICES:
@@ -776,6 +868,60 @@ def job_status(job_id: str):
     if not job:
         abort(404)
     return render_template("job.html", job=job)
+
+
+# A job that is queued or running is still doing work, so clearing leaves it alone.
+FINISHED_JOB_STATES = ("completed", "failed")
+
+
+def clear_jobs(scope: str) -> int:
+    """Forget finished downloads, or every download that is not still running."""
+    if scope == "all":
+        # Deleting a running job's row would leave the worker updating a row that
+        # no longer exists, so active work is always kept.
+        query = "DELETE FROM jobs WHERE state NOT IN ('queued','running')"
+        parameters: tuple[str, ...] = ()
+    else:
+        query = f"DELETE FROM jobs WHERE state IN ({','.join('?' * len(FINISHED_JOB_STATES))})"
+        parameters = FINISHED_JOB_STATES
+    with db_connect() as con:
+        return int(con.execute(query, parameters).rowcount or 0)
+
+
+@app.post("/jobs/clear")
+def clear_job_history():
+    """Remove download history. The downloaded files themselves are never touched."""
+    require_csrf()
+    scope = request.form.get("scope", "finished")
+    if scope not in {"finished", "all"}:
+        abort(400)
+    removed = clear_jobs(scope)
+    if removed:
+        flash(
+            f"Removed {removed} download{'' if removed == 1 else 's'} from the history. "
+            "The downloaded files were not deleted."
+        )
+    else:
+        flash("There was no finished download history to remove.")
+    return redirect(url_for("index"))
+
+
+@app.post("/jobs/<job_id>/delete")
+def delete_job(job_id: str):
+    """Remove one finished download from the history."""
+    require_csrf()
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        abort(404)
+    with db_connect() as con:
+        job = con.execute("SELECT state FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not job:
+            abort(404)
+        if job["state"] in {"queued", "running"}:
+            flash("That download is still working. It can be removed once it finishes.")
+            return redirect(url_for("job_status", job_id=job_id))
+        con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+    flash("Removed that download from the history. The downloaded file was not deleted.")
+    return redirect(url_for("index"))
 
 
 def update_job(job_id: str, **fields: Any) -> None:
@@ -937,13 +1083,255 @@ def parse_pdf_import(stream: Any) -> list[dict[str, str]]:
     return dedupe_import_entries(entries)
 
 
+def read_import_bytes(stream: Any, description: str) -> bytes:
+    stream.seek(0)
+    raw = stream.read()
+    if not isinstance(raw, bytes):
+        raw = str(raw).encode("utf-8")
+    if len(raw) > 16 * 1024 * 1024:
+        raise RuntimeError(f"The {description} is too large.")
+    return raw
+
+
+def decode_import_text(raw: bytes, description: str) -> str:
+    for encoding in ("utf-8-sig", "utf-16", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise RuntimeError(f"The {description} encoding could not be read.")
+
+
+def playlist_track_name(location: str) -> str:
+    """Turn a playlist's file reference into the name of the music it points at."""
+    text = str(location or "").strip().strip('"')
+    if re.match(r"(?i)^[a-z][a-z0-9+.-]*://", text) or text.lower().startswith("file:"):
+        # Playlists store references as URIs, so the readable name is percent-encoded.
+        text = unquote(urlparse(text).path or text).lstrip("/")
+    name = re.split(r"[\\/]", text)[-1]
+    if Path(name).suffix.lower() in AUDIO_FILE_EXTENSIONS:
+        name = Path(name).stem
+    name = name.replace("_", " ")
+    # Drop the leading track number that ripping software writes into file names.
+    name = re.sub(r"^\s*\d{1,3}\s*[-._)]\s+", "", name)
+    return clean_import_value(name)
+
+
+def playlist_entry(location: str = "", title: str = "", artist: str = "") -> dict[str, str] | None:
+    """Build one import entry from a playlist's location and its stated metadata."""
+    location = str(location or "").strip()
+    title = clean_import_value(title)
+    artist = clean_import_value(artist)
+    if location.lower().startswith(("http://", "https://")) and looks_like_media_url(location):
+        return {"url": location}
+    if artist and title:
+        return {"artist": artist, "title": title}
+    if title:
+        return import_entry_from_values(title)
+    if not location:
+        return None
+    name = playlist_track_name(location)
+    return import_entry_from_values(name) if name else None
+
+
+def parse_m3u_playlist(text: str) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    pending_artist = ""
+    pending_title = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.upper().startswith("#EXTINF:"):
+            _duration, _, described = line.partition(":")[2].partition(",")
+            described = clean_import_value(described)
+            if " - " in described:
+                pending_artist, pending_title = (
+                    clean_import_value(part) for part in described.split(" - ", 1)
+                )
+            else:
+                pending_artist, pending_title = "", described
+            continue
+        if line.startswith("#"):
+            continue
+        entry = playlist_entry(line, pending_title, pending_artist)
+        pending_artist = pending_title = ""
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def parse_pls_playlist(text: str) -> list[dict[str, str]]:
+    files: dict[str, str] = {}
+    titles: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"(?i)^(file|title)(\d+)\s*=\s*(.*)$", line)
+        if not match:
+            continue
+        field, number, value = match.group(1).lower(), match.group(2), match.group(3).strip()
+        (files if field == "file" else titles)[number] = value
+    entries: list[dict[str, str]] = []
+    for number in sorted(set(files) | set(titles), key=lambda value: int(value)):
+        entry = playlist_entry(files.get(number, ""), titles.get(number, ""))
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def parse_playlist_xml(text: str) -> Any:
+    """Parse playlist XML, refusing the entity tricks that make XML a security problem."""
+    if re.search(r"<!\s*(DOCTYPE|ENTITY)", text, re.IGNORECASE):
+        raise RuntimeError("That playlist declares an XML document type, which is not read.")
+    try:
+        return ElementTree.fromstring(text)
+    except ElementTree.ParseError as exc:
+        raise RuntimeError(f"That playlist is not readable XML: {exc}") from exc
+
+
+def _xml_text(element: Any, *names: str) -> str:
+    """Read a child element's text, ignoring the XML namespace it was written with."""
+    for child in element.iter():
+        tag = str(child.tag or "").rsplit("}", 1)[-1].casefold()
+        if tag in names and (child.text or "").strip():
+            return str(child.text).strip()
+    return ""
+
+
+def parse_xspf_playlist(text: str) -> list[dict[str, str]]:
+    root = parse_playlist_xml(text)
+    entries: list[dict[str, str]] = []
+    for element in root.iter():
+        if str(element.tag or "").rsplit("}", 1)[-1].casefold() != "track":
+            continue
+        entry = playlist_entry(
+            _xml_text(element, "location"),
+            _xml_text(element, "title"),
+            _xml_text(element, "creator"),
+        )
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def parse_xml_reference_playlist(text: str) -> list[dict[str, str]]:
+    """Read Windows Media Player WPL and ASX playlists, which name files in attributes."""
+    root = parse_playlist_xml(text)
+    entries: list[dict[str, str]] = []
+    for element in root.iter():
+        tag = str(element.tag or "").rsplit("}", 1)[-1].casefold()
+        if tag not in {"media", "ref", "entry"}:
+            continue
+        location = ""
+        for name, value in element.attrib.items():
+            if str(name).rsplit("}", 1)[-1].casefold() in {"src", "href"}:
+                location = str(value)
+                break
+        entry = playlist_entry(location, _xml_text(element, "title"), _xml_text(element, "author"))
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def parse_cue_playlist(text: str) -> list[dict[str, str]]:
+    album_artist = ""
+    entries: list[dict[str, str]] = []
+    current_artist = ""
+    current_title = ""
+    in_track = False
+
+    def flush() -> None:
+        nonlocal current_artist, current_title
+        if current_title:
+            entry = playlist_entry("", current_title, current_artist or album_artist)
+            if entry:
+                entries.append(entry)
+        current_artist = current_title = ""
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if re.match(r"(?i)^TRACK\s+\d+", line):
+            flush()
+            in_track = True
+            continue
+        match = re.match(r'(?i)^(PERFORMER|TITLE)\s+"?(.*?)"?\s*$', line)
+        if not match:
+            continue
+        field, value = match.group(1).upper(), clean_import_value(match.group(2))
+        if not in_track:
+            if field == "PERFORMER":
+                album_artist = value
+            continue
+        if field == "PERFORMER":
+            current_artist = value
+        else:
+            current_title = value
+    flush()
+    return entries
+
+
+def parse_fpl_playlist(raw: bytes) -> list[dict[str, str]]:
+    """Read a foobar2000 playlist, whose file references sit in a binary string table."""
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for chunk in raw.split(b"\x00"):
+        try:
+            text = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        text = text.strip()
+        if len(text) < 4 or len(text) > 2048:
+            continue
+        lowered = text.casefold()
+        is_reference = lowered.startswith(("file://", "http://", "https://")) or (
+            Path(lowered).suffix in AUDIO_FILE_EXTENSIONS and re.search(r"[\\/]", text)
+        )
+        if not is_reference or text in seen:
+            continue
+        seen.add(text)
+        entry = playlist_entry(text)
+        if entry:
+            entries.append(entry)
+    if not entries:
+        raise RuntimeError(
+            "No track references were found in that foobar2000 playlist. "
+            "Export it as M3U8 from foobar2000 and upload that instead."
+        )
+    return entries
+
+
+def parse_playlist_import(extension: str, stream: Any) -> list[dict[str, str]]:
+    raw = read_import_bytes(stream, "playlist file")
+    if extension in {".fpl", ".fb2k-playlist"}:
+        return dedupe_import_entries(parse_fpl_playlist(raw))
+    text = decode_import_text(raw, "playlist file")
+    if extension == ".pls":
+        entries = parse_pls_playlist(text)
+    elif extension == ".xspf":
+        entries = parse_xspf_playlist(text)
+    elif extension in {".wpl", ".asx"}:
+        entries = parse_xml_reference_playlist(text)
+    elif extension == ".cue":
+        entries = parse_cue_playlist(text)
+    else:
+        entries = parse_m3u_playlist(text)
+    if not entries:
+        raise RuntimeError("No tracks were found in that playlist.")
+    return dedupe_import_entries(entries)
+
+
 def parse_import_file(filename: str, stream: Any) -> list[dict[str, str]]:
     extension = Path(filename).suffix.lower()
     parsers = {".txt": parse_txt_import, ".xlsx": parse_xlsx_import, ".pdf": parse_pdf_import}
     parser = parsers.get(extension)
-    if not parser:
-        raise RuntimeError("Only TXT, XLSX, and PDF files are supported.")
-    return parser(stream)
+    if parser:
+        return parser(stream)
+    if extension in PLAYLIST_EXTENSIONS:
+        return parse_playlist_import(extension, stream)
+    raise RuntimeError(
+        "Only TXT, XLSX, PDF, and playlist files (M3U, M3U8, PLS, XSPF, WPL, ASX, CUE, FPL) "
+        "are supported."
+    )
 
 
 def safe_filename(value: str, fallback: str = "Unknown") -> str:
@@ -1378,6 +1766,275 @@ def expand_deezer(item: dict[str, Any]) -> list[dict[str, Any]]:
     return tracks
 
 
+def browse_item(result: dict[str, Any], detail: str = "") -> dict[str, Any]:
+    """Reduce a search result to the fields the browse page shows and submits."""
+    return {
+        "token": result["token"],
+        "label": clean_text(str(result.get("title") or "")) or "Untitled",
+        "detail": detail or str(result.get("detail") or ""),
+        "kind": str(result.get("kind") or ""),
+        "cover": str(result.get("cover") or ""),
+    }
+
+
+def browse_section(heading: str, note: str, items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return {"heading": heading, "note": note, "items": items} if items else None
+
+
+def deezer_album_detail(raw: dict[str, Any]) -> str:
+    year = str(raw.get("release_date") or "")[:4]
+    record_type = str(raw.get("record_type") or "").replace("_", " ").strip().title()
+    count = int(raw.get("nb_tracks") or 0)
+    return " — ".join(
+        part for part in (record_type, year, f"{count} tracks" if count else "") if part
+    )
+
+
+def deezer_browse_sections(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """List one Deezer artist's releases and popular tracks."""
+    artist_id = str(item.get("id") or "")
+    if not artist_id.isdigit():
+        raise RuntimeError("That Deezer artist has no usable ID.")
+    sections: list[dict[str, Any] | None] = []
+
+    try:
+        albums = deezer_paginate(
+            f"https://api.deezer.com/artist/{artist_id}/albums",
+            {"limit": 100, "output": "json"},
+            MAX_BROWSE_ITEMS,
+        )
+    except Exception:
+        albums = []
+    releases = [
+        browse_item(format_deezer_result(raw, "album"), deezer_album_detail(raw))
+        for raw in albums
+        if raw.get("id")
+    ]
+    sections.append(browse_section("Releases", "Whole albums, EPs, and singles.", releases))
+
+    try:
+        top = api_json(
+            f"https://api.deezer.com/artist/{artist_id}/top",
+            {"limit": MAX_BROWSE_ITEMS, "output": "json"},
+        )
+        raw_tracks = [raw for raw in top.get("data") or [] if raw.get("id")]
+    except Exception:
+        raw_tracks = []
+    tracks = [browse_item(format_deezer_result(raw, "song")) for raw in raw_tracks]
+    sections.append(browse_section("Popular tracks", "Individual songs.", tracks))
+    return [section for section in sections if section]
+
+
+def youtube_album_result(raw: dict[str, Any], artist: str) -> dict[str, Any] | None:
+    browse_id = str(raw.get("browseId") or "")
+    if not browse_id:
+        return None
+    title = clean_text(str(raw.get("title") or "Untitled"))
+    payload = {
+        "source": "youtube", "kind": "album", "id": browse_id, "video_id": "",
+        "browse_id": browse_id, "title": title, "artist": artist, "album": title,
+        "duration_seconds": 0, "cover": best_thumbnail(raw.get("thumbnails")),
+    }
+    detail = " — ".join(
+        part for part in (artist, str(raw.get("type") or ""), str(raw.get("year") or "")) if part
+    )
+    return {**payload, "detail": detail, "token": signer.dumps(payload)}
+
+
+def youtube_track_result(raw: dict[str, Any], artist: str) -> dict[str, Any] | None:
+    track = metadata_from_yt_track(raw)
+    if not track["video_id"]:
+        return None
+    payload = {
+        "source": "youtube", "kind": "video", "id": track["video_id"],
+        "video_id": track["video_id"], "title": track["title"],
+        "artist": track["artist"] if track["artist"] != "Unknown Artist" else (artist or track["artist"]),
+        "album": track["album"], "duration_seconds": track["duration_seconds"],
+        "cover": track["cover"],
+    }
+    detail = " — ".join(
+        part for part in (
+            payload["artist"], payload["album"], format_duration(payload["duration_seconds"])
+        ) if part
+    )
+    return {**payload, "detail": detail, "token": signer.dumps(payload)}
+
+
+def youtube_playlist_tracks(ytm: YTMusic, browse_id: str) -> list[dict[str, Any]]:
+    """Read a YouTube Music playlist, tolerating playlists that cannot be opened."""
+    try:
+        playlist = ytm.get_playlist(str(browse_id).removeprefix("VL"), limit=MAX_BROWSE_ITEMS)
+    except Exception:
+        return []
+    return list(playlist.get("tracks") or [])
+
+
+def youtube_browse_sections(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """List one YouTube Music artist's albums, singles, songs, and videos."""
+    browse_id = str(item.get("browse_id") or item.get("id") or "")
+    if not browse_id:
+        raise RuntimeError("That YouTube artist has no usable ID.")
+    ytm = YTMusic()
+    data = ytm.get_artist(browse_id)
+    artist = clean_text(str(data.get("name") or item.get("artist") or item.get("title") or ""))
+    sections: list[dict[str, Any] | None] = []
+
+    for heading, key in (("Albums", "albums"), ("Singles and EPs", "singles")):
+        group = data.get(key) or {}
+        entries = list(group.get("results") or [])
+        if group.get("params"):
+            # The artist page shows only the first few; this asks for the full shelf.
+            try:
+                entries = ytm.get_artist_albums(
+                    browse_id, str(group["params"]), limit=MAX_BROWSE_ITEMS
+                ) or entries
+            except Exception:
+                pass
+        results = [youtube_album_result(raw, artist) for raw in entries[:MAX_BROWSE_ITEMS]]
+        sections.append(
+            browse_section(heading, "Whole releases.", [browse_item(r) for r in results if r])
+        )
+
+    for heading, key in (("Songs", "songs"), ("Videos", "videos")):
+        group = data.get(key) or {}
+        raw_tracks = list(group.get("results") or [])
+        if group.get("browseId"):
+            raw_tracks = youtube_playlist_tracks(ytm, str(group["browseId"])) or raw_tracks
+        results = [youtube_track_result(raw, artist) for raw in raw_tracks[:MAX_BROWSE_ITEMS]]
+        sections.append(
+            browse_section(heading, "Individual tracks.", [browse_item(r) for r in results if r])
+        )
+    return [section for section in sections if section]
+
+
+def youtube_channel_sections(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """List a YouTube channel's published releases, playlists, and videos."""
+    from .youtube_collections import collection_tab_url
+
+    collection_url = str(item.get("collection_url") or "")
+    if not collection_url:
+        raise RuntimeError("That YouTube channel has no usable address.")
+    fallback_artist = clean_text(str(item.get("artist") or item.get("title") or ""))
+    sections: list[dict[str, Any] | None] = []
+
+    def read_tab(tab: str) -> dict[str, Any]:
+        try:
+            return ytdlp_json(collection_tab_url(collection_url, tab), playlist_limit=MAX_BROWSE_ITEMS)
+        except Exception:
+            return {}
+
+    # Each tab is a separate yt-dlp run, so read all three at once rather than in turn.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {tab: pool.submit(read_tab, tab) for tab in ("releases", "playlists", "videos")}
+        tabs = {tab: future.result() for tab, future in futures.items()}
+
+    for heading, tab, note in (
+        ("Releases", "releases", "Albums and EPs the channel has published."),
+        ("Playlists", "playlists", "Whole playlists from the channel."),
+    ):
+        raw = tabs[tab]
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in raw.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            playlist_id = str(entry.get("id") or "")
+            if not re.fullmatch(r"[A-Za-z0-9_-]{10,100}", playlist_id) or playlist_id in seen:
+                continue
+            seen.add(playlist_id)
+            title = clean_text(str(entry.get("title") or "Untitled release"))
+            payload = {
+                "source": "youtube", "kind": "playlist", "id": playlist_id,
+                "browse_id": playlist_id, "title": title, "artist": fallback_artist,
+                "cover": ytdlp_thumbnail(entry), "url_playlist": True,
+            }
+            count = int(entry.get("playlist_count") or 0)
+            detail = " — ".join(
+                part for part in (fallback_artist, f"{count} tracks" if count else "") if part
+            )
+            items.append(browse_item({**payload, "detail": detail, "token": signer.dumps(payload)}))
+        sections.append(browse_section(heading, note, items))
+
+    raw = tabs["videos"]
+    videos: list[dict[str, Any]] = []
+    seen_videos: set[str] = set()
+    for entry in raw.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        video_id = str(entry.get("id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id) or video_id in seen_videos:
+            continue
+        seen_videos.add(video_id)
+        title = clean_youtube_title(str(entry.get("track") or entry.get("title") or "Untitled"))
+        artist = clean_text(
+            str(entry.get("artist") or entry.get("uploader") or entry.get("channel") or fallback_artist)
+        ) or "Unknown Artist"
+        duration = int(entry.get("duration") or 0)
+        payload = {
+            "source": "youtube", "kind": "video", "id": video_id, "video_id": video_id,
+            "title": title, "artist": artist, "album": clean_text(str(entry.get("album") or "")),
+            "duration_seconds": duration, "cover": ytdlp_thumbnail(entry),
+        }
+        detail = " — ".join(part for part in (artist, format_duration(duration)) if part)
+        videos.append(browse_item({**payload, "detail": detail, "token": signer.dumps(payload)}))
+    sections.append(browse_section("Videos", "Individual videos.", videos))
+    return [section for section in sections if section]
+
+
+def browse_sections(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """List everything a person can pick from for one artist or channel."""
+    kind = str(item.get("kind") or "")
+    if kind == "channel":
+        return youtube_channel_sections(item)
+    if kind != "artist":
+        raise RuntimeError("Only artists and YouTube channels can be opened this way.")
+    if str(item.get("source") or "") == "deezer":
+        return deezer_browse_sections(item)
+    return youtube_browse_sections(item)
+
+
+def selection_payloads(sections: list[dict[str, Any]], tokens: list[str]) -> list[dict[str, Any]]:
+    """Turn submitted tokens into payloads, keeping the order the page showed."""
+    wanted = set(tokens)
+    payloads: list[dict[str, Any]] = []
+    for section in sections:
+        for entry in section["items"]:
+            if entry["token"] not in wanted:
+                continue
+            try:
+                payload = signer.loads(entry["token"], max_age=86400)
+            except (BadSignature, SignatureExpired):
+                continue
+            if payload.get("source") in {"youtube", "deezer"}:
+                payloads.append(payload)
+    return payloads
+
+
+def expand_selection(payload: dict[str, Any], job_id: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Expand every release, album, or video a person picked into its tracks."""
+    items = payload.get("items") or []
+    tracks: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for number, item in enumerate(items, 1):
+        label = clean_text(f"{item.get('artist', '')} {item.get('title', 'Untitled')}") or "Untitled"
+        update_job(job_id, detail=f"Reading selection {number} of {len(items)}: {label[:160]}")
+        try:
+            resolved = expand_youtube(item) if item.get("source") == "youtube" else expand_deezer(item)
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+        for track in resolved:
+            identity = track_identity(track)
+            if identity and identity not in seen:
+                seen.add(identity)
+                tracks.append(track)
+                if len(tracks) >= MAX_IMPORT_TRACKS:
+                    errors.append(f"The selection was limited to {MAX_IMPORT_TRACKS:,} unique tracks.")
+                    return tracks, errors
+    return tracks, errors
+
+
 def download_cover(url: str) -> tuple[bytes, str] | None:
     if not url or not url.startswith("https://"):
         return None
@@ -1750,15 +2407,19 @@ def download_one(track: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
         track["title"] = clean_youtube_title(track.get("title", "")) or "Untitled"
         tag_audio(prepared, track)
         probe_audio(prepared)
-        os.chmod(prepared, 0o644)
+        permissions.make_readable(prepared)
         destination_name = f"{stem}{prepared.suffix.lower()}"
         if AZURACAST_ENABLED:
             upload_to_azuracast(prepared, destination_name)
         else:
             # Local downloader mode: the download folder is the final destination.
             DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            permissions.make_readable(DOWNLOAD_DIR)
             local_path = DOWNLOAD_DIR / destination_name
             shutil.move(str(prepared), local_path)
+            # Moving keeps the temporary folder's private permissions, so set them
+            # again once the file is in its final home.
+            permissions.make_readable(local_path)
     if not AZURACAST_ENABLED:
         assert local_path is not None
         return "downloaded", local_path, {"path": str(local_path), "unique_id": ""}
@@ -1778,6 +2439,9 @@ def process_job(job: sqlite3.Row) -> None:
     errors = []
     if payload["source"] == "import":
         tracks, resolution_errors = expand_import(payload, job_id)
+        errors.extend(resolution_errors)
+    elif payload["source"] == "selection":
+        tracks, resolution_errors = expand_selection(payload, job_id)
         errors.extend(resolution_errors)
     else:
         tracks = expand_youtube(payload) if payload["source"] == "youtube" else expand_deezer(payload)
@@ -1858,6 +2522,7 @@ def settings_page():
             "bind_host": request.form.get("bind_host", "").strip() or config.DEFAULT_BIND_HOST,
             "bind_port": request.form.get("bind_port", "").strip() or config.DEFAULT_BIND_PORT,
             "deezer_arl": request.form.get("deezer_arl", "").strip(),
+            "diagnostics_enabled": bool(request.form.get("diagnostics_enabled")),
         }
         # Serving plain HTTP on this machine means the session cookie cannot be Secure.
         submitted["secure_cookies"] = submitted["bind_host"] not in config.LOOPBACK_HOSTS

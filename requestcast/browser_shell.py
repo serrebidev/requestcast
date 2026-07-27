@@ -1,10 +1,10 @@
 """Verify and open RequestCast's local web interface on Windows.
 
-The default browser can be unable to reach loopback addresses when it is a Store
-application, uses a forced proxy, has an HTTPS-only policy, or has an extension
-that intercepts local requests. RequestCast therefore verifies the real HTML
-page and then opens it in a clean Chromium window with proxying and HTTPS
-upgrades disabled. Windows shell handlers remain as fallbacks.
+RequestCast verifies that its real HTML page works and then hands the address to
+Windows, which opens whichever browser the person has chosen as their default. It
+never installs, downloads, or copies a browser, and never creates a browser
+profile of its own — earlier versions did, which quietly consumed hundreds of
+megabytes of disk space.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import http.client
 import os
 import shutil
 import subprocess
-import time
 import webbrowser
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -161,82 +160,44 @@ def _explorer_open(target: str | Path) -> bool:
         return False
 
 
-def _chromium_browser_paths() -> list[Path]:
-    """Return installed Chromium browsers, preferring Microsoft Edge."""
-    names = ("msedge.exe", "chrome.exe", "brave.exe", "vivaldi.exe")
-    relatives = (
-        Path("Microsoft/Edge/Application/msedge.exe"),
-        Path("Google/Chrome/Application/chrome.exe"),
-        Path("BraveSoftware/Brave-Browser/Application/brave.exe"),
-        Path("Vivaldi/Application/vivaldi.exe"),
-    )
-    candidates: list[Path] = []
-    for name in names:
-        located = shutil.which(name)
-        if located:
-            candidates.append(Path(located))
-    for variable in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
-        base = os.environ.get(variable)
-        if not base:
-            continue
-        root = Path(base)
-        candidates.extend(root / relative for relative in relatives)
-
-    output: list[Path] = []
+def legacy_browser_profile_roots() -> list[Path]:
+    """Return the private browser profiles that versions before 1.4 created."""
+    names = ("requestcast-browser-profile", "requestcast-browser-profiles")
+    roots: list[Path] = []
     seen: set[str] = set()
-    for path in candidates:
-        key = str(path).casefold()
-        if key in seen or not path.is_file():
+    for parent in (config.config_path().parent, config.app_dir()):
+        for name in names:
+            candidate = parent / name
+            key = str(candidate).casefold()
+            if key not in seen:
+                seen.add(key)
+                roots.append(candidate)
+    return roots
+
+
+def remove_legacy_browser_profiles() -> list[Path]:
+    """Delete browser profiles an older RequestCast copied onto this machine.
+
+    Those folders held a full Chromium user-data directory — frequently several
+    hundred megabytes — for a browser the person never asked RequestCast to use.
+    """
+    removed: list[Path] = []
+    for root in legacy_browser_profile_roots():
+        if not root.is_dir():
             continue
-        seen.add(key)
-        output.append(path)
-    return output
-
-
-def _launch_clean_chromium(url: str) -> Path | None:
-    """Open a separate browser profile that cannot proxy or HTTPS-upgrade localhost."""
-    if os.name != "nt":
-        return None
-    profile_root = config.config_path().parent / "requestcast-browser-profile"
-    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    for executable in _chromium_browser_paths():
-        profile = profile_root / executable.stem.casefold()
         try:
-            profile.mkdir(parents=True, exist_ok=True)
-            process = subprocess.Popen(
-                [
-                    str(executable),
-                    f"--user-data-dir={profile}",
-                    "--no-proxy-server",
-                    "--proxy-bypass-list=*",
-                    "--disable-extensions",
-                    "--no-first-run",
-                    "--disable-first-run-ui",
-                    "--disable-background-mode",
-                    "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable",
-                    "--new-window",
-                    url,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=flags,
-            )
-        except OSError:
+            shutil.rmtree(root)
+        except OSError as exc:
+            server.log_startup(f"Could not remove the old browser profile {root}: {exc}")
             continue
-        time.sleep(1.25)
-        if process.poll() is None:
-            return executable
-    return None
+        removed.append(root)
+        server.log_startup(f"Removed an old RequestCast browser profile: {root}")
+    return removed
 
 
 def open_default_browser(url: str, shortcut: Path | None = None) -> bool:
-    """Open RequestCast using a clean local-capable browser, then shell fallbacks."""
+    """Open RequestCast in whichever browser Windows is set to use by default."""
     if os.name == "nt":
-        executable = _launch_clean_chromium(url)
-        if executable is not None:
-            server.log_startup(f"Clean no-proxy browser launched: {executable}; URL: {url}")
-            return True
-
         attempts: list[tuple[str, object]] = [
             ("Windows startfile URL association", lambda: _startfile(url)),
             ("Windows ShellExecuteW URL association", lambda: _shell_execute(url)),
@@ -270,7 +231,8 @@ def open_default_browser(url: str, shortcut: Path | None = None) -> bool:
 
 
 def launch_browser_when_ready(url: str, timeout: float = 30.0) -> bool:
-    """Wait for RequestCast, verify its HTML page, then open a clean browser."""
+    """Wait for RequestCast, verify its HTML page, then open the default browser."""
+    remove_legacy_browser_profiles()
     shortcut = server.create_browser_shortcut(url)
     server.log_startup(f"Waiting for RequestCast health endpoint: {url}")
     if not server.wait_for_server(url, timeout=timeout):
@@ -291,10 +253,10 @@ def launch_browser_when_ready(url: str, timeout: float = 30.0) -> bool:
 
     if open_default_browser(url, shortcut):
         extra = f" A manual shortcut is at {shortcut}." if shortcut else ""
-        print(f"A clean local browser launch was requested for {url}.{extra}", flush=True)
+        print(f"Your default browser was asked to open {url}.{extra}", flush=True)
         return True
 
-    message = f"Windows could not open a browser. Open {url} manually."
+    message = f"Windows could not open your default browser. Open {url} manually."
     if shortcut:
         message += f" You can also activate {shortcut}."
     server.log_startup(message)

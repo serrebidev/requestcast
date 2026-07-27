@@ -16,10 +16,15 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = (
+    "test_artist_browse.py",
+    "test_browser_and_diagnostics.py",
     "test_deezer_download.py",
     "test_deezer_import_match.py",
+    "test_download_permissions.py",
     "test_first_run.py",
+    "test_job_history.py",
     "test_legacy_env.py",
+    "test_playlist_import.py",
     "test_preferences.py",
     "test_quality_preservation.py",
     "test_request_flow.py",

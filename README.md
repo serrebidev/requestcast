@@ -9,7 +9,15 @@ It runs two ways from the same code: a **portable Windows program** you double-c
 ## What it does
 
 - Search YouTube and Deezer from one box, or paste a URL to a track, album, playlist, or artist
+- Open any **artist or YouTube channel** to take everything, or tick only the releases,
+  albums, and videos you actually want
 - Upload a **TXT, XLSX, or PDF list** of music and it indexes the whole thing, then works through it
+- Upload a **playlist you already have** — M3U, M3U8, PLS, XSPF, WPL, ASX, CUE, or
+  foobar2000 FPL — and it fetches the tracks the playlist names, without needing the
+  original files
+- Finished files are **readable by every account** on the machine, with no permission
+  fixing afterwards
+- **Clear the download history** whenever you like; the music files are left alone
 - With a **Deezer subscriber ARL** configured, downloads come from Deezer first — **FLAC**, or
   **320 kbps MP3** when FLAC is not offered — and YouTube is only the fallback
 - Prefers **Deezer's copy of a track's metadata** when one matches cleanly, so artist, title,
@@ -28,9 +36,10 @@ It runs two ways from the same code: a **portable Windows program** you double-c
 
 ## Portable Windows program
 
-Download the release, unzip it anywhere, and run `RequestCast.exe`. The setup page opens in your
-browser. Everything it writes — settings, the job database, downloaded music — stays inside that
-folder, so the whole thing can live on a USB stick.
+Download the release, unzip it anywhere, and run `RequestCast.exe`. The setup page opens in
+**your own default browser** — RequestCast never downloads, installs, or copies a browser of
+its own. Everything it writes — settings, the job database, downloaded music — stays inside
+that folder, so the whole thing can live on a USB stick.
 
 On first run it asks for:
 
@@ -41,6 +50,13 @@ On first run it asks for:
 4. **An admin password** — protects Preferences.
 
 Use **Preferences** to change these later.
+
+### Diagnostics
+
+Diagnostics are **off**. When they are on, RequestCast writes a request log and collects a
+support ZIP of Windows networking evidence beside the program — tens of megabytes — so it
+only does that when someone has asked you for one. Turn it on in **Preferences**, or start
+with `RequestCast.exe --diagnostics`. `--diagnose` collects one bundle and exits.
 
 ### Building it yourself
 
@@ -76,6 +92,7 @@ REQUESTCAST_PASSWORD_HASH=...   # scrypt, hex
 REQUESTCAST_ADMIN_PASSWORD_SALT=...
 REQUESTCAST_ADMIN_PASSWORD_HASH=...
 REQUESTCAST_DEEZER_ARL=...      # optional Deezer subscriber ARL
+REQUESTCAST_DIAGNOSTICS=1       # optional; collects a support bundle, off by default
 ```
 
 Setting `REQUESTCAST_AZURACAST_API_KEY` turns the AzuraCast integration on. Serve it with
@@ -106,9 +123,10 @@ python tests/run_all.py
 ```
 
 This includes the Deezer quality, decryption, source-preference, YouTube-fallback, setup,
-configuration, import, request, upload, audio-preservation, and URL-input checks. The remaining
-scripts under `tests/` are manual integration checks: they require either the private playlist
-fixtures named in the script or a live RequestCast/AzuraCast deployment.
+configuration, import, playlist-format, artist-browsing, job-history, download-permission,
+default-browser, diagnostics, request, upload, audio-preservation, and URL-input checks. The
+remaining scripts under `tests/` are manual integration checks: they require either the private
+playlist fixtures named in the script or a live RequestCast/AzuraCast deployment.
 
 ## Accessibility
 

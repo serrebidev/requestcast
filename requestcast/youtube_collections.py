@@ -17,6 +17,8 @@ YOUTUBE_HOSTS = {
 CHANNEL_HOSTS = {"youtube.com", "m.youtube.com", "music.youtube.com"}
 CHANNEL_PREFIXES = {"channel", "c", "user"}
 CHANNEL_TABS = {"videos", "shorts", "streams"}
+# Tabs RequestCast can list when someone browses a channel rather than taking all of it.
+CHANNEL_BROWSE_TABS = {"videos", "shorts", "streams", "playlists", "releases"}
 VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
 PLAYLIST_ID_RE = re.compile(r"[A-Za-z0-9_-]{10,100}")
 
@@ -78,6 +80,15 @@ def canonical_collection_url(value: str) -> str:
         base, tab = _channel_base(_segments(parsed)) or ([], "videos")
         return f"https://www.youtube.com/{'/'.join([*base, tab])}"
     raise RuntimeError("That YouTube URL is not a playlist or channel URL.")
+
+
+def collection_tab_url(value: str, tab: str) -> str:
+    """Return one tab of a channel, such as the releases it has published."""
+    if collection_kind(value) != "channel":
+        raise RuntimeError("That YouTube URL is not a channel URL.")
+    base, _current = _channel_base(_segments(_parsed_url(value))) or ([], "videos")
+    wanted = tab if tab in CHANNEL_BROWSE_TABS else "videos"
+    return f"https://www.youtube.com/{'/'.join([*base, wanted])}"
 
 
 def _video_id_from_value(value: Any) -> str:

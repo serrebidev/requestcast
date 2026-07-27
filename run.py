@@ -33,6 +33,27 @@ def selected_http_backend() -> str:
     return "werkzeug-threaded" if os.name == "nt" else "waitress"
 
 
+def diagnostics_are_wanted(
+    settings: dict[str, Any],
+    argv: list[str],
+    diagnostic_only: bool = False,
+) -> bool:
+    """Decide whether to collect the support bundle, which is off unless asked for.
+
+    Diagnostics write tens of megabytes of Windows networking evidence beside the
+    program, so they stay off until someone turns the preference on, passes
+    ``--diagnose`` or ``--diagnostics``, or sets ``REQUESTCAST_DIAGNOSTICS=1``.
+    ``--no-diagnostics`` and ``REQUESTCAST_DISABLE_DIAGNOSTICS=1`` always win.
+    """
+    if diagnostic_only:
+        return True
+    if "--no-diagnostics" in argv or os.environ.get("REQUESTCAST_DISABLE_DIAGNOSTICS") == "1":
+        return False
+    if "--diagnostics" in argv:
+        return True
+    return bool(settings.get("diagnostics_enabled"))
+
+
 def tcp_port_is_open(host: str, port: int, timeout: float = 0.5) -> bool:
     """Detect an existing listener even when its HTTP response body is stuck."""
     connect_host = "127.0.0.1" if server.is_loopback_host(host) or server.is_wildcard_host(host) else host
@@ -124,12 +145,9 @@ def main() -> int:
         print("Packaged imports succeeded.")
         return 0
 
-    diagnostic_only = "--diagnose" in sys.argv
-    diagnostics_enabled = diagnostic_only or (
-        "--no-diagnostics" not in sys.argv
-        and os.environ.get("REQUESTCAST_DISABLE_DIAGNOSTICS") != "1"
-    )
     settings = config.load()
+    diagnostic_only = "--diagnose" in sys.argv
+    diagnostics_enabled = diagnostics_are_wanted(settings, sys.argv, diagnostic_only)
     host = str(settings.get("bind_host") or config.DEFAULT_BIND_HOST)
     port = int(settings.get("bind_port") or config.DEFAULT_BIND_PORT)
     urls = server.browser_urls(host, port)
@@ -146,6 +164,8 @@ def main() -> int:
         return 0
 
     diagnostics.install_exception_hooks()
+    for profile in browser_shell.remove_legacy_browser_profiles():
+        print(f"Reclaimed disk space from an old RequestCast browser profile: {profile}")
     if diagnostic_only:
         os.environ["REQUESTCAST_DISABLE_WORKER"] = "1"
 
@@ -153,12 +173,13 @@ def main() -> int:
 
     server.allow_loopback_http_sessions(app, host)
     if not getattr(app, "_requestcast_http_framing_wrapped", False):
+        # Without diagnostics there is no request log, so nothing is written per request.
         app.wsgi_app = BufferedClosingMiddleware(
             app.wsgi_app,
-            diagnostics.log_http,
+            diagnostics.log_http if diagnostics_enabled else None,
             add_connection_close=os.name != "nt",
         )
-        app._requestcast_http_framing_wrapped = True
+        setattr(app, "_requestcast_http_framing_wrapped", True)
 
     print("RequestCast web interface:")
     for url in urls:
@@ -166,9 +187,11 @@ def main() -> int:
     print(f"HTTP backend: {selected_http_backend()}")
     print("HTTP framing: HTTP/1.0, exact Content-Length, Connection: close")
     print(f"Startup diagnostics: {server.startup_log_path()}")
-    print(f"HTTP request log: {diagnostics.http_log_path()}")
     if diagnostics_enabled:
+        print(f"HTTP request log: {diagnostics.http_log_path()}")
         print(f"Full diagnostic ZIP: {diagnostics.diagnostics_zip_path()}")
+    else:
+        print("Diagnostics: off. Turn them on in Preferences, or start with --diagnostics.")
 
     if port_open:
         if server.requestcast_is_reachable(launch_url, timeout=1.5):
