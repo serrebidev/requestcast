@@ -86,6 +86,8 @@ def run_download(track, deezer_client, musicdl_enabled=True, musicdl_side_effect
     if musicdl_side_effect is not None:
         patches.append(patch.object(app.musicdl_source, "search_and_download", side_effect=musicdl_side_effect))
     if ytdlp_side_effect is not None:
+        # The CI runner has no yt-dlp on its PATH, so the path check is patched too.
+        patches.append(patch.object(app, "YTDLP", "yt-dlp"))
         patches.append(patch.object(app.subprocess, "run", side_effect=ytdlp_side_effect))
     for patcher in patches:
         patcher.start()
