@@ -74,10 +74,15 @@ try:
     assert not appmod.looks_rate_limited("This track has no direct download URL to store.")
     print("rate_limit_failures_recognised=passed")
 
-    # The wording explains what a bare 403 actually means.
-    described = appmod.describe_download_error("HTTP Error 403: Forbidden")
+    # The wording explains what a bare 403 actually means. With Deno present that is
+    # rate limiting; without it, the missing runtime is the real cause and says so.
+    with patch.object(appmod, "DENO", "deno"):
+        described = appmod.describe_download_error("HTTP Error 403: Forbidden")
     assert "rate limiting" in described, described
     assert "403" in described
+    with patch.object(appmod, "DENO", ""):
+        described = appmod.describe_download_error("HTTP Error 403: Forbidden")
+    assert "Deno is not installed" in described, described
     print("download_errors_explained=passed")
 
     # Waits double, and never exceed the cooldown ceiling.
@@ -204,6 +209,7 @@ try:
     row = {"id": "job-1", "attempts": 2}
     with (
         patch.object(appmod, "JOB_RETRY_LIMIT", 2),
+        patch.object(appmod, "DENO", "deno"),
         patch.object(appmod, "update_job") as gave_up,
     ):
         appmod.fail_or_requeue(row, RuntimeError("HTTP Error 403: Forbidden"))
