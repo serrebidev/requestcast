@@ -1,20 +1,23 @@
-Whole-library lists now fit. The upload limits were far too small.
+musicdl joins the download chain, and its platforms' URLs now work.
 
-**250,000 entries per file, up from 10,000.** Plenty of people keep lists longer than ten
-thousand rows, and there was no good reason for the old ceiling — indexing was never the
-slow part. On an ordinary machine, 250,000 rows takes about a second to index from a TXT
-file and about eleven seconds from an XLSX workbook, and a PDF page costs roughly three
-milliseconds. The new limits are set by what that work actually costs.
+**A second fallback before YouTube.** When Deezer cannot supply a track — or no Deezer
+ARL is configured — RequestCast now asks [musicdl](https://github.com/CharlesPikachu/musicdl)
+before resorting to YouTube: it searches the configured platforms for a clean
+artist/title match and downloads the best result. YouTube via yt-dlp remains the last
+resort, so nothing that worked before is lost. The fallback is on by default; turn it
+off in Settings or with `REQUESTCAST_MUSICDL_ENABLED=0`, and choose which platforms it
+searches with `REQUESTCAST_MUSICDL_SOURCES` (the default is musicdl's own reliable
+five: Migu, NetEase, QQ, Kuwo, and Qianqian).
 
-**Bigger files are accepted.** Uploads may now be 64 MB rather than 16 MB, PDFs may run to
-5,000 pages rather than 500, and an import may resolve up to 250,000 tracks rather than
-25,000. A file past the ceiling is still refused, and now fails as soon as it goes over
-instead of being read into memory in full first.
+**URLs from twenty more platforms.** Paste a track or playlist URL from NetEase,
+QQ Music, Kugou, Kuwo, Migu, Qianqian, Spotify, SoundCloud, TIDAL, Qobuz, Apple Music,
+JOOX, JioSaavn, Jamendo, Soda, StreetVoice, FMA, Suno, MOOV, 5SING, Bodian, or Bilibili
+and RequestCast downloads it through musicdl directly — same tagging, same quality
+checks, same destination as everything else. The same URLs work inside uploaded TXT,
+XLSX, PDF, and playlist files.
 
-**The main page stays fast.** A large import stores every indexed entry with its job, so
-listing recent downloads no longer reads those payloads back — it reads only the few
-columns it shows. Without that, drawing the home page after a few whole-library imports
-would have meant loading hundreds of megabytes.
+**Downloaded files keep the same treatment.** However the audio arrives, it is tagged
+with the track's metadata, verified with ffprobe, and made readable by every account
+on the machine before it lands in the download folder or the AzuraCast library.
 
-If you run RequestCast behind nginx, raise `client_max_body_size` to `64m` and keep a
-generous `proxy_read_timeout`, since indexing happens inside the upload request.
+Note: musicdl is licensed for non-commercial use; see its repository for the terms.
