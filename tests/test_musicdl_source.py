@@ -24,6 +24,19 @@ assert musicdl_source.client_name_for_url("not a url at all") is None
 print("host_client_mapping=passed")
 
 
+# musicdl's logger needs a writable XDG home; prepare_environment supplies one.
+with patch.dict(os.environ, {}, clear=False):
+    for name in ("XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+        os.environ.pop(name, None)
+    musicdl_source.prepare_environment("/tmp/requestcast-xdg")
+    assert os.environ["XDG_STATE_HOME"] == str(Path("/tmp/requestcast-xdg/musicdl/state"))
+    # An admin-provided XDG setting always wins.
+    os.environ["XDG_CACHE_HOME"] = "/custom/cache"
+    musicdl_source.prepare_environment("/tmp/requestcast-xdg-other")
+    assert os.environ["XDG_CACHE_HOME"] == "/custom/cache"
+print("xdg_environment=passed")
+
+
 # Song payloads must survive JSON so they can live inside the signed result token.
 from musicdl.modules.utils import SongInfo
 

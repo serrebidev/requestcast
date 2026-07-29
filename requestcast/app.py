@@ -159,8 +159,12 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
 
     # musicdl sits between Deezer and YouTube as a download fallback and parses the
     # other platforms' URLs. Importing it is slow, so availability is checked lazily
-    # on first use rather than here.
+    # on first use rather than here. Its logger insists on a writable XDG directory,
+    # which a hardened service account may not have in its home — point it at the
+    # state dir instead.
     MUSICDL_ENABLED = bool(SETTINGS.get("musicdl_enabled"))
+    if MUSICDL_ENABLED:
+        musicdl_source.prepare_environment(STATE_DIR)
     MUSICDL_SOURCES = [
         name.strip()
         for name in str(SETTINGS.get("musicdl_sources", "")).split(",")

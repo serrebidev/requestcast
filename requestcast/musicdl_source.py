@@ -20,6 +20,7 @@ import contextlib
 import functools
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -80,6 +81,24 @@ def _quiet() -> contextlib.ExitStack:
     stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
     stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
     return stack
+
+
+def prepare_environment(base_dir: Path | str) -> None:
+    """Point the XDG directories musicdl's logger uses at somewhere writable.
+
+    musicdl creates its log directory (``platformdirs.user_log_dir``) the moment a
+    client is constructed. On a hardened Linux service the account's home may be
+    read-only, which turns that into ``[Errno 30] Read-only file system``. Existing
+    XDG settings always win.
+    """
+    base = Path(base_dir) / "musicdl"
+    for name, sub in (
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_DATA_HOME", "data"),
+    ):
+        os.environ.setdefault(name, str(base / sub))
 
 
 @functools.lru_cache(maxsize=1)
