@@ -276,3 +276,77 @@ with patch.object(app.musicdl_source, "parse_url", return_value=[song]) as parse
 assert parse.call_count == 1
 assert len(expanded) == 1 and expanded[0]["source"] == "musicdl"
 print("expand_musicdl=passed")
+
+
+# Single-track pages (a SoundCloud song, not a set) are read and searched.
+SOUNDCLOUD_PAGE = """
+<html><head>
+<title>Stream Somebody by Kurokatu | Listen online for free on SoundCloud</title>
+<meta property="og:title" content="Somebody">
+<meta property="og:description" content="Listen to Somebody by Kurokatu #np on #SoundCloud">
+<meta name="twitter:description" content="Listen to Somebody by Kurokatu #np on #SoundCloud">
+<meta name="description" content="Stream Somebody by Kurokatu on desktop and mobile. Play over 320 million tracks for free on SoundCloud.">
+</head><body></body></html>
+"""
+assert musicdl_source.artist_title_from_page(SOUNDCLOUD_PAGE) == ("Kurokatu", "Somebody")
+assert musicdl_source.artist_title_from_page("<html><head></head></html>") == ("", "")
+print("artist_title_from_page=passed")
+
+
+class FakePageResponse:
+    text = SOUNDCLOUD_PAGE
+
+    def raise_for_status(self):
+        pass
+
+
+class FakeSearchClient:
+    def __init__(self, results):
+        self.results = results
+        self.keywords = []
+
+    def search(self, keyword):
+        self.keywords.append(keyword)
+        return self.results
+
+
+soundcloud_song = SongInfo(
+    source="SoundCloudMusicClient", song_name="Somebody", singers="Kurokatu",
+    ext="mp3", duration_s=200, identifier="sc-1", protocol="HLS",
+    download_url="https://cf-media.sndcdn.com/somebody.m3u8", download_url_status={"ok": True},
+)
+fake_client = FakeSearchClient({"SoundCloudMusicClient": [soundcloud_song]})
+with (
+    patch.object(musicdl_source.requests, "get", return_value=FakePageResponse()),
+    patch.object(musicdl_source, "get_music_client", return_value=fake_client),
+):
+    found = musicdl_source._track_from_page(
+        "https://soundcloud.com/kuro-katu/somebody", "SoundCloudMusicClient", "/tmp", app.match_key
+    )
+assert fake_client.keywords == ["Kurokatu Somebody"]
+assert len(found) == 1 and found[0].song_name == "Somebody"
+print("track_from_page=passed")
+
+
+# HLS tracks cannot store a payload, so the entry keeps the platform for a later search.
+hls_entry = app.musicdl_track_entry(soundcloud_song)
+assert "musicdl" not in hls_entry
+assert hls_entry["client"] == "SoundCloudMusicClient"
+assert hls_entry["title"] == "Somebody" and hls_entry["artist"] == "Kurokatu"
+print("hls_entry_keeps_client=passed")
+
+
+# Without a stored payload the download searches the track's own platform.
+def search_records_sources(artist, title, duration_s, sources, temp_dir, match_key):
+    assert sources == ["SoundCloudMusicClient"], sources
+    return fake_musicdl_file(temp_dir, name="sc-hit.mp3", data=b"sc-audio")
+
+
+with (
+    patch.object(app, "MUSICDL_ENABLED", True),
+    patch.object(app, "MUSICDL_SOURCES", ["NeteaseMusicClient"]),
+    patch.object(app.musicdl_source, "search_and_download", side_effect=search_records_sources),
+):
+    downloaded = app.download_via_musicdl(dict(hls_entry), Path(tempfile.mkdtemp()))
+assert downloaded.read_bytes() == b"sc-audio"
+print("download_via_musicdl_prefers_track_platform=passed")

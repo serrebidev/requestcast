@@ -668,9 +668,10 @@ def deezer_url_result(value: str) -> dict[str, Any]:
 
 
 def musicdl_track_entry(song_info: Any) -> dict[str, Any]:
-    """Shape a musicdl SongInfo as a track, keeping the download data musicdl needs."""
+    """Shape a musicdl SongInfo as a track. The direct-download payload is kept when
+    it is storable; otherwise the job re-resolves the track by searching its platform."""
     identifier = str(song_info.get("identifier") or "")
-    return {
+    entry = {
         "source": "musicdl", "kind": "song", "id": identifier,
         "source_id": identifier, "video_id": "",
         "title": clean_text(str(song_info.get("song_name") or "")) or "Untitled",
@@ -679,8 +680,13 @@ def musicdl_track_entry(song_info: Any) -> dict[str, Any]:
         "duration_seconds": int(song_info.get("duration_s") or 0),
         "track_number": 0, "disc_number": 0, "year": "", "isrc": "",
         "cover": str(song_info.get("cover_url") or ""),
-        "musicdl": musicdl_source.song_info_to_payload(song_info),
+        "client": str(song_info.get("source") or ""),
     }
+    try:
+        entry["musicdl"] = musicdl_source.song_info_to_payload(song_info)
+    except musicdl_source.MusicdlError:
+        pass
+    return entry
 
 
 def musicdl_url_result(value: str, client_name: str) -> dict[str, Any]:
@@ -690,15 +696,10 @@ def musicdl_url_result(value: str, client_name: str) -> dict[str, Any]:
     problem = musicdl_source.availability()
     if problem:
         raise RuntimeError(problem)
-    song_infos = musicdl_source.parse_url(value, client_name, str(STATE_DIR / "musicdl-parse"))
-    tracks = []
-    for song_info in song_infos:
-        try:
-            tracks.append(musicdl_track_entry(song_info))
-        except musicdl_source.MusicdlError:
-            continue
+    song_infos = musicdl_source.parse_url(value, client_name, str(STATE_DIR / "musicdl-parse"), match_key)
+    tracks = [musicdl_track_entry(song_info) for song_info in song_infos]
     if not tracks:
-        raise RuntimeError("That URL did not produce any tracks RequestCast can store.")
+        raise RuntimeError("That URL did not produce any tracks RequestCast can use.")
     platform = client_name.removesuffix("MusicClient")
     if len(tracks) == 1:
         track = tracks[0]
@@ -1867,14 +1868,9 @@ def expand_musicdl(item: dict[str, Any]) -> list[dict[str, Any]]:
         str(item.get("url") or item.get("id") or ""),
         str(item.get("client") or ""),
         str(STATE_DIR / "musicdl-parse"),
+        match_key,
     )
-    tracks = []
-    for song_info in song_infos:
-        try:
-            tracks.append(musicdl_track_entry(song_info))
-        except musicdl_source.MusicdlError:
-            continue
-    return tracks
+    return [musicdl_track_entry(song_info) for song_info in song_infos]
 
 
 def browse_item(result: dict[str, Any], detail: str = "") -> dict[str, Any]:
@@ -2476,9 +2472,13 @@ def download_via_musicdl(track: dict[str, Any], temp_dir: Path) -> Path:
     stored = track.get("musicdl")
     if isinstance(stored, dict):
         return musicdl_source.download_payload(stored, temp_dir)
+    # Tracks whose download URL could not be stored (HLS streams, short-lived
+    # links) are re-resolved by searching the platform they came from.
+    platform = str(track.get("client") or "")
+    sources = [platform] if platform else MUSICDL_SOURCES
     return musicdl_source.search_and_download(
         str(track.get("artist", "")), str(track.get("title", "")),
-        int(track.get("duration_seconds") or 0), MUSICDL_SOURCES, temp_dir, match_key,
+        int(track.get("duration_seconds") or 0), sources, temp_dir, match_key,
     )
 
 

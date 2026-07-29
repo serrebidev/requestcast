@@ -21,9 +21,13 @@ import functools
 import io
 import json
 import os
+import re
+from html import unescape
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
+
+import requests
 
 
 class MusicdlError(RuntimeError):
@@ -148,11 +152,75 @@ def get_music_client(sources: list[str], work_dir: str) -> Any:
         raise MusicdlError(f"musicdl could not start: {exc}") from exc
 
 
-def parse_url(url: str, client_name: str, work_dir: str) -> list[Any]:
+PAGE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+)
+HTTP_TIMEOUT = (10, 30)
+
+
+def _meta_contents(html: str, *names: str) -> list[str]:
+    """Content attributes of matching <meta> tags, in either attribute order."""
+    found = []
+    for tag in re.findall(r"<meta\b[^>]*>", html, flags=re.IGNORECASE):
+        name = re.search(r'(?:property|name)="([^"]+)"', tag, flags=re.IGNORECASE)
+        content = re.search(r'content="([^"]*)"', tag, flags=re.IGNORECASE)
+        if name and content and name.group(1).lower() in names:
+            found.append(unescape(content.group(1)))
+    return found
+
+
+def artist_title_from_page(html: str) -> tuple[str, str]:
+    """Best-effort ``(artist, title)`` from a track page's title and meta tags.
+
+    Handles the common shapes, for example SoundCloud's
+    ``Stream <title> by <artist> | Listen online for free on SoundCloud`` and its
+    ``Listen to <title> by <artist> #np on #SoundCloud`` description.
+    """
+    candidates = (
+        _meta_contents(html, "og:description")
+        + _meta_contents(html, "twitter:description")
+        + _meta_contents(html, "description")
+    )
+    title_tag = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+    if title_tag:
+        candidates.append(unescape(title_tag.group(1)))
+    for candidate in candidates:
+        text = candidate.split("|")[0]
+        text = re.sub(r"^(stream|listen to)\s+", "", text.strip(), flags=re.IGNORECASE)
+        text = re.sub(r"#\w+.*$", "", text)
+        text = re.sub(r"\s+on desktop and mobile\..*$", "", text, flags=re.IGNORECASE).strip()
+        match = re.match(r"(?P<title>.+?)\s+by\s+(?P<artist>[^#|]+)$", text, flags=re.IGNORECASE)
+        if match:
+            return match.group("artist").strip(), match.group("title").strip()
+    og_titles = _meta_contents(html, "og:title", "twitter:title")
+    return "", og_titles[0].strip() if og_titles else ""
+
+
+def _track_from_page(url: str, client_name: str, work_dir: str, match_key: Callable[[Any], str]) -> list[Any]:
+    """A single-track page parseplaylist cannot handle: read the page, then search."""
+    try:
+        response = requests.get(url, headers={"User-Agent": PAGE_USER_AGENT}, timeout=HTTP_TIMEOUT)
+        response.raise_for_status()
+    except requests.RequestException:
+        return []
+    artist, title = artist_title_from_page(response.text)
+    if not title:
+        return []
+    client = get_music_client([client_name], work_dir)
+    with _quiet():
+        results = client.search(keyword=" ".join(part for part in (artist, title) if part))
+    best = _best_match(results, artist, title, 0, match_key)
+    return [best] if best is not None else []
+
+
+def parse_url(url: str, client_name: str, work_dir: str, match_key: Callable[[Any], str] | None = None) -> list[Any]:
     """Parse a platform URL into musicdl SongInfo objects."""
     client = get_music_client([client_name], work_dir)
     with _quiet():
         song_infos = client.parseplaylist(url)
+    if not song_infos and match_key is not None:
+        song_infos = _track_from_page(url, client_name, work_dir, match_key)
     if not song_infos:
         raise MusicdlError("That URL did not produce any tracks musicdl recognizes.")
     return list(song_infos)
@@ -235,6 +303,21 @@ def search_and_download(
         raise MusicdlError("Nothing to search for.")
     with _quiet():
         results = client.search(keyword=keyword)
+    best = _best_match(results, artist, title, duration_s, match_key)
+    if best is None:
+        raise MusicdlError("No musicdl source had a clean match for this track.")
+    return _download_song_info(best, temp_dir)
+
+
+def _best_match(
+    results: dict[str, list[Any]],
+    artist: str,
+    title: str,
+    duration_s: int,
+    match_key: Callable[[Any], str],
+) -> Any | None:
+    """The highest-scoring SongInfo across all sources, following the same clean
+    title-match and artist-containment rules as the Deezer matcher."""
     wanted_title = match_key(title)
     wanted_artist = match_key(artist)
     best: tuple[tuple, Any] | None = None
@@ -255,6 +338,4 @@ def search_and_download(
             score = _candidate_score(song_info, wanted_title, duration_s, match_key)
             if score is not None and (best is None or score > best[0]):
                 best = (score, song_info)
-    if best is None:
-        raise MusicdlError("No musicdl source had a clean match for this track.")
-    return _download_song_info(best[1], temp_dir)
+    return best[1] if best is not None else None
