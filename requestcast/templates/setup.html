@@ -11,14 +11,19 @@
 <section aria-labelledby="tools-heading">
   <h2 id="tools-heading">Download tools</h2>
   <p>Required for downloads. Missing: {{ missing_tools | join(', ') }}.</p>
+  {% if 'deno' in missing_tools %}
+  <p>Deno is the JavaScript runtime yt-dlp uses to answer YouTube's challenges. Without it,
+    YouTube downloads lose the better formats and fail with 403 errors that no amount of
+    retrying will clear.</p>
+  {% endif %}
   {% if can_auto_install %}
   <form method="post" action="{{ url_for('setup_tools') }}">
     {% if not first_run %}<input type="hidden" name="csrf" value="{{ csrf_token() }}">{% endif %}
     <button type="submit">Install tools</button>
   </form>
-  <p class="hint">They are saved in a <code>tools</code> folder next to the program. About 80 MB.</p>
+  <p class="hint">They are saved in a <code>tools</code> folder next to the program. About 120 MB.</p>
   {% else %}
-  <p>Install <code>ffmpeg</code> and <code>yt-dlp</code>, then reload.</p>
+  <p>Install <code>ffmpeg</code>, <code>yt-dlp</code>, and <code>deno</code>, then reload.</p>
   {% endif %}
 </section>
 {% endif %}
@@ -85,6 +90,71 @@
   <p class="hint">Tried between Deezer and YouTube, for example
     MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient.</p>
 
+  <h2>Search</h2>
+  <label for="search_result_limit">Results per source and result type</label>
+  <input id="search_result_limit" name="search_result_limit" type="number" min="5" max="200"
+         value="{{ settings.search_result_limit }}" inputmode="numeric">
+  <p class="hint">Between 5 and 200. Each search page can pick a different number; this is
+    the one it starts with. Higher means more to choose from and a slower search.</p>
+  <label for="search_musicdl">
+    <input id="search_musicdl" name="search_musicdl" type="checkbox" value="1"
+           {% if settings.search_musicdl %}checked{% endif %}>
+    Search musicdl platforms as well as YouTube and Deezer
+  </label>
+  <p class="hint">Finds far more, including tracks YouTube and Deezer do not carry, but
+    every configured musicdl platform is queried in turn, so searches take longer. The
+    search page can include or exclude musicdl per search either way.</p>
+
+  <h2>Retries and pacing</h2>
+  <p>Bulk downloads — a channel, a discography, or a playlist import — are what trip
+    YouTube's rate limiting: a run of tracks fails with 403 or "video unavailable" even
+    though the same tracks download fine later. These settings decide how hard and how
+    patiently RequestCast tries again.</p>
+
+  <label for="download_retries">Extra attempts per track</label>
+  <input id="download_retries" name="download_retries" type="number" min="0" max="10"
+         value="{{ settings.download_retries }}" inputmode="numeric">
+  <p class="hint">0 to 10. Each attempt asks YouTube as a different client, which is what
+    usually clears a 403. Anything still failing gets one more pass at the end of the job.</p>
+
+  <label for="download_retry_delay">Seconds before the first retry</label>
+  <input id="download_retry_delay" name="download_retry_delay" type="number" min="0" max="600"
+         value="{{ settings.download_retry_delay }}" inputmode="numeric">
+  <p class="hint">0 to 600. The wait doubles with each further attempt.</p>
+
+  <label for="download_gap_seconds">Seconds between tracks</label>
+  <input id="download_gap_seconds" name="download_gap_seconds" type="number" min="0" max="120"
+         value="{{ settings.download_gap_seconds }}" inputmode="numeric">
+  <p class="hint">0 to 120. A gap is the most effective way to stop a long queue being
+    rate limited in the first place. Raise it if whole batches keep failing.</p>
+
+  <label for="rate_limit_cooldown">Seconds to pause after repeated refusals</label>
+  <input id="rate_limit_cooldown" name="rate_limit_cooldown" type="number" min="0" max="3600"
+         value="{{ settings.rate_limit_cooldown }}" inputmode="numeric">
+  <p class="hint">0 to 3600. Used when several downloads in a row are refused, and again
+    before the final pass over the tracks that failed. 0 turns pausing off.</p>
+
+  <label for="job_retry_limit">Times to requeue a whole failed download</label>
+  <input id="job_retry_limit" name="job_retry_limit" type="number" min="0" max="10"
+         value="{{ settings.job_retry_limit }}" inputmode="numeric">
+  <p class="hint">0 to 10. Applies when a download fails outright rather than track by
+    track. Any finished download can also be queued again by hand from its status page.</p>
+
+  <h2>Tool updates</h2>
+  <p>yt-dlp, ffmpeg, and Deno are installed for you in the background when they are
+    missing, whatever this setting says — nothing downloads without them.</p>
+  <label for="auto_update_tools">
+    <input id="auto_update_tools" name="auto_update_tools" type="checkbox" value="1"
+           {% if settings.auto_update_tools %}checked{% endif %}>
+    Keep yt-dlp, Deno, and musicdl up to date automatically
+  </label>
+  <p class="hint">Recommended. All three stop working as the sites they read change, and an
+    out-of-date yt-dlp is the most common cause of 403 and "video unavailable" failures.</p>
+  <label for="auto_update_interval_hours">Hours between update checks</label>
+  <input id="auto_update_interval_hours" name="auto_update_interval_hours" type="number"
+         min="1" max="720" value="{{ settings.auto_update_interval_hours }}" inputmode="numeric">
+  <p class="hint">1 to 720. Checking costs one small request per tool.</p>
+
   <h2>Access</h2>
   <label for="password">{% if first_run %}Password{% else %}New password{% endif %}</label>
   <input id="password" name="password" type="password" {% if first_run %}required{% endif %} autocomplete="new-password">
@@ -125,6 +195,25 @@
 
   <button type="submit">{% if first_run %}Save and start{% else %}Save preferences{% endif %}</button>
 </form>
+
+{% if not first_run %}
+<section aria-labelledby="update-now-heading">
+  <h2 id="update-now-heading">Update the download tools now</h2>
+  <p>Checks for newer yt-dlp, Deno, and musicdl releases and installs them. Worth doing when
+    downloads start failing with 403 or "video unavailable".</p>
+  {% if tool_versions %}
+  <ul>
+    {% for name, version in tool_versions %}<li>{{ name }}: {{ version }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if last_update_check %}<p>Last checked: {{ last_update_check }}.</p>{% endif %}
+  <form method="post" action="{{ url_for('update_tools') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <button type="submit">Check for updates and install them</button>
+  </form>
+  <p class="hint">This can take a minute. Save any preference changes first.</p>
+</section>
+{% endif %}
 
 <p class="hint">Settings are stored in {{ config_path }}.</p>
 {% endblock %}

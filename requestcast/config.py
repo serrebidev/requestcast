@@ -28,6 +28,19 @@ DEFAULT_BIND_HOST = "127.0.0.1"
 DEFAULT_BIND_PORT = 8797
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
+# Numeric settings are clamped to what the program can actually honour, so a hand-edited
+# settings file or a stray environment variable cannot ask for 10,000 search results or a
+# retry delay measured in days. (key: (minimum, maximum)).
+NUMERIC_LIMITS: dict[str, tuple[int, int]] = {
+    "search_result_limit": (5, 200),
+    "download_retries": (0, 10),
+    "download_retry_delay": (0, 600),
+    "download_gap_seconds": (0, 120),
+    "rate_limit_cooldown": (0, 3600),
+    "job_retry_limit": (0, 10),
+    "auto_update_interval_hours": (1, 720),
+}
+
 # Written by the setup page; read by everything else.
 FIELDS: dict[str, Any] = {
     "download_dir": "",
@@ -50,11 +63,34 @@ FIELDS: dict[str, Any] = {
     "ytdlp_path": "",
     "ffmpeg_path": "",
     "ffprobe_path": "",
+    # YouTube now answers with JavaScript challenges that yt-dlp cannot solve on its own,
+    # so it hands them to an external JavaScript runtime. Deno is the one yt-dlp enables
+    # by default; without it YouTube downloads lose formats and fail with 403.
+    "deno_path": "",
     "deezer_arl": "",
     # musicdl is the fallback source between Deezer and YouTube, and also handles
     # the other platforms' URLs. Sources are musicdl client names, comma-separated.
     "musicdl_enabled": True,
     "musicdl_sources": "MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient",
+    # How much a search brings back, per source and per result type. Each search page can
+    # ask for a different number; this is the starting point the form offers.
+    "search_result_limit": 50,
+    # Searching musicdl as well as YouTube and Deezer finds far more, but every musicdl
+    # source is queried in turn, so it is slower and stays opt-in.
+    "search_musicdl": False,
+    # Bulk downloads (a channel, a discography, a playlist import) are what trip YouTube's
+    # rate limiting: a run of tracks fails with 403 or "video unavailable" even though the
+    # same tracks download fine later. These four settings are the answer to that.
+    "download_retries": 2,
+    "download_retry_delay": 20,
+    "download_gap_seconds": 2,
+    "rate_limit_cooldown": 180,
+    # A whole job that fails is put back in the queue this many times before it gives up.
+    "job_retry_limit": 1,
+    # yt-dlp and musicdl both break when they fall behind the sites they read, so they
+    # keep themselves current unless someone turns that off.
+    "auto_update_tools": True,
+    "auto_update_interval_hours": 24,
     # Diagnostics write a large support bundle to disk, so they stay off until asked for.
     "diagnostics_enabled": False,
 }
@@ -80,9 +116,19 @@ ENVIRONMENT_NAMES: dict[str, tuple[str, ...]] = {
     "ytdlp_path": ("REQUESTCAST_YTDLP", "ADDTO_YTDLP"),
     "ffmpeg_path": ("REQUESTCAST_FFMPEG",),
     "ffprobe_path": ("REQUESTCAST_FFPROBE",),
+    "deno_path": ("REQUESTCAST_DENO",),
     "deezer_arl": ("REQUESTCAST_DEEZER_ARL", "ADDTO_DEEZER_ARL"),
     "musicdl_enabled": ("REQUESTCAST_MUSICDL_ENABLED",),
     "musicdl_sources": ("REQUESTCAST_MUSICDL_SOURCES",),
+    "search_result_limit": ("REQUESTCAST_SEARCH_LIMIT",),
+    "search_musicdl": ("REQUESTCAST_SEARCH_MUSICDL",),
+    "download_retries": ("REQUESTCAST_DOWNLOAD_RETRIES",),
+    "download_retry_delay": ("REQUESTCAST_DOWNLOAD_RETRY_DELAY",),
+    "download_gap_seconds": ("REQUESTCAST_DOWNLOAD_GAP",),
+    "rate_limit_cooldown": ("REQUESTCAST_RATE_LIMIT_COOLDOWN",),
+    "job_retry_limit": ("REQUESTCAST_JOB_RETRY_LIMIT",),
+    "auto_update_tools": ("REQUESTCAST_AUTO_UPDATE_TOOLS",),
+    "auto_update_interval_hours": ("REQUESTCAST_AUTO_UPDATE_HOURS",),
     "diagnostics_enabled": ("REQUESTCAST_DIAGNOSTICS",),
 }
 
@@ -173,6 +219,16 @@ def _coerce(key: str, value: Any) -> Any:
     return str(value).strip()
 
 
+def clamp(key: str, value: Any) -> int:
+    """Keep a numeric setting inside the range the program can honour."""
+    lowest, highest = NUMERIC_LIMITS[key]
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        number = int(FIELDS[key])
+    return max(lowest, min(highest, number))
+
+
 def load() -> dict[str, Any]:
     """Merge defaults, the settings file, and the environment into one settings dict."""
     settings = dict(FIELDS)
@@ -187,6 +243,8 @@ def load() -> dict[str, Any]:
         if any(os.environ.get(name) for name in ENVIRONMENT_NAMES["azuracast_api_key"]):
             settings["azuracast_enabled"] = True
     settings = {key: _coerce(key, value) for key, value in settings.items()}
+    for key in NUMERIC_LIMITS:
+        settings[key] = clamp(key, settings[key])
     if not settings["download_dir"]:
         settings["download_dir"] = str(default_download_dir())
     if not settings["state_dir"]:

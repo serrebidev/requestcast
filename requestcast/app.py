@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import itertools
 import json
 import os
 import re
@@ -57,6 +58,26 @@ MAX_ARTIST_ALBUMS = 300
 # How many releases or videos one browse page offers per section.
 MAX_BROWSE_ITEMS = 200
 BROWSABLE_KINDS = {"artist", "channel"}
+# What the search page offers as "results per source". The saved preference is the
+# starting point; each search can ask for a different number from this list.
+SEARCH_LIMIT_CHOICES = (10, 25, 50, 100, 200)
+# Deezer returns at most 100 rows per call, so larger limits are paged.
+DEEZER_PAGE_SIZE = 100
+# yt-dlp asks YouTube as one of several clients. When a download comes back 403 or
+# "unavailable" during a bulk run, the next attempt asks as a different client, which
+# is what usually clears it. The first attempt leaves yt-dlp to its own default.
+YTDLP_PLAYER_CLIENTS = ("", "tv,web_safari", "ios,mweb", "android,web")
+# Failures that mean "the site is pushing back", not "this track does not exist".
+# A run of these during a channel, discography, or playlist import is rate limiting:
+# the same tracks download fine once the queue slows down.
+RATE_LIMIT_SIGNS = (
+    "403", "429", "too many requests", "rate limit", "rate-limit", "throttl",
+    "sign in to confirm", "not a bot", "video unavailable", "unable to download",
+    "temporarily unavailable", "please try again later", "connection reset",
+    "read timed out", "timed out", "failed to extract", "unavailable videos",
+)
+# Consecutive rate-limited failures before the job pauses to let the site settle.
+RATE_LIMIT_STREAK = 2
 # Playlists people already have. A playlist names files this machine may not hold, so
 # each entry is treated as a request for that artist and title, not as a local file.
 PLAYLIST_EXTENSIONS = {
@@ -71,6 +92,14 @@ AZURACAST_AUDIO_EXTENSIONS = {
     ".aac", ".aif", ".aiff", ".flac", ".m4a", ".mp2", ".mp3", ".mp4",
     ".oga", ".ogg", ".opus", ".wav", ".wma",
 }
+
+# Set by the test suite and by one-off tooling. The download worker, the automatic tool
+# installer, and the update checker all stay out of the way when it is set, so nothing
+# reaches the network behind a test's back.
+WORKER_DISABLED = (
+    os.environ.get("REQUESTCAST_DISABLE_WORKER") == "1"
+    or os.environ.get("ADDTO_DISABLE_WORKER") == "1"
+)
 
 app = Flask(__name__)
 app.permanent_session_lifetime = timedelta(hours=12)
@@ -90,6 +119,7 @@ DB_PATH = Path("jobs.sqlite3")
 YTDLP = ""
 FFMPEG = ""
 FFPROBE = ""
+DENO = ""
 AZURACAST_ENABLED = False
 AZURACAST_API_BASE = ""
 AZURACAST_API_KEY = ""
@@ -105,6 +135,15 @@ DEEZER: deezer.DeezerClient | None = None
 DEEZER_ERROR = ""
 MUSICDL_ENABLED = False
 MUSICDL_SOURCES: list[str] = []
+SEARCH_RESULT_LIMIT = 50
+SEARCH_MUSICDL = False
+DOWNLOAD_RETRIES = 2
+DOWNLOAD_RETRY_DELAY = 20
+DOWNLOAD_GAP_SECONDS = 2
+RATE_LIMIT_COOLDOWN = 180
+JOB_RETRY_LIMIT = 1
+AUTO_UPDATE_TOOLS = True
+AUTO_UPDATE_INTERVAL_HOURS = 24
 signer: URLSafeTimedSerializer | None = None
 
 
@@ -114,12 +153,15 @@ def station_api(path: str) -> str:
 
 def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     """Load settings into module state. Safe to call again after the setup page saves."""
-    global SETTINGS, STATE_DIR, DOWNLOAD_DIR, MEDIA_DIR, DB_PATH, YTDLP, FFMPEG, FFPROBE
+    global SETTINGS, STATE_DIR, DOWNLOAD_DIR, MEDIA_DIR, DB_PATH, YTDLP, FFMPEG, FFPROBE, DENO
     global AZURACAST_ENABLED, AZURACAST_API_BASE, AZURACAST_API_KEY, STATION_ID
     global REQUEST_PLAYLIST_ID, UPLOAD_DIR, SECRET_KEY, PASSWORD_SALT, PASSWORD_HASH
     global ADMIN_PASSWORD_SALT, ADMIN_PASSWORD_HASH, signer
     global DEEZER, DEEZER_ERROR
     global MUSICDL_ENABLED, MUSICDL_SOURCES
+    global SEARCH_RESULT_LIMIT, SEARCH_MUSICDL
+    global DOWNLOAD_RETRIES, DOWNLOAD_RETRY_DELAY, DOWNLOAD_GAP_SECONDS, RATE_LIMIT_COOLDOWN
+    global JOB_RETRY_LIMIT, AUTO_UPDATE_TOOLS, AUTO_UPDATE_INTERVAL_HOURS
 
     SETTINGS = new_settings if new_settings is not None else config.load()
     STATE_DIR = Path(SETTINGS["state_dir"])
@@ -128,6 +170,9 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     YTDLP = tools.find_tool("yt-dlp", SETTINGS.get("ytdlp_path", ""))
     FFMPEG = tools.find_tool("ffmpeg", SETTINGS.get("ffmpeg_path", "")) or "ffmpeg"
     FFPROBE = tools.find_tool("ffprobe", SETTINGS.get("ffprobe_path", "")) or "ffprobe"
+    # yt-dlp hands YouTube's JavaScript challenges to Deno. yt-dlp finds Deno on PATH by
+    # itself; this is for our own copy in the tools folder, which is not on PATH.
+    DENO = tools.find_tool("deno", SETTINGS.get("deno_path", ""))
 
     AZURACAST_ENABLED = bool(SETTINGS.get("azuracast_enabled"))
     AZURACAST_API_BASE = str(SETTINGS.get("azuracast_api_base", "")).rstrip("/")
@@ -170,6 +215,19 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
         for name in str(SETTINGS.get("musicdl_sources", "")).split(",")
         if name.strip()
     ]
+
+    # How much a search brings back, and how hard a download tries before giving up.
+    SEARCH_RESULT_LIMIT = config.clamp("search_result_limit", SETTINGS.get("search_result_limit"))
+    SEARCH_MUSICDL = bool(SETTINGS.get("search_musicdl")) and MUSICDL_ENABLED
+    DOWNLOAD_RETRIES = config.clamp("download_retries", SETTINGS.get("download_retries"))
+    DOWNLOAD_RETRY_DELAY = config.clamp("download_retry_delay", SETTINGS.get("download_retry_delay"))
+    DOWNLOAD_GAP_SECONDS = config.clamp("download_gap_seconds", SETTINGS.get("download_gap_seconds"))
+    RATE_LIMIT_COOLDOWN = config.clamp("rate_limit_cooldown", SETTINGS.get("rate_limit_cooldown"))
+    JOB_RETRY_LIMIT = config.clamp("job_retry_limit", SETTINGS.get("job_retry_limit"))
+    AUTO_UPDATE_TOOLS = bool(SETTINGS.get("auto_update_tools", True))
+    AUTO_UPDATE_INTERVAL_HOURS = config.clamp(
+        "auto_update_interval_hours", SETTINGS.get("auto_update_interval_hours")
+    )
 
     app.secret_key = SECRET_KEY or "setup-mode-only"
     # Secure by default. The portable build turns this off when it saves a loopback
@@ -214,10 +272,15 @@ def init_db() -> None:
                 error TEXT NOT NULL DEFAULT '',
                 payload TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        # Job databases written before retries existed have no attempts column.
+        columns = {str(row["name"]) for row in con.execute("PRAGMA table_info(jobs)")}
+        if "attempts" not in columns:
+            con.execute("ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
         con.execute(
             "UPDATE jobs SET state='queued', detail='Resuming after service restart' WHERE state='running'"
         )
@@ -467,7 +530,7 @@ def format_yt_result(raw: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def search_youtube(query: str, kind: str) -> list[dict[str, Any]]:
+def search_youtube(query: str, kind: str, limit: int = 0) -> list[dict[str, Any]]:
     filters = {
         "song": "songs",
         "video": "videos",
@@ -475,13 +538,16 @@ def search_youtube(query: str, kind: str) -> list[dict[str, Any]]:
         "playlist": "playlists",
         "artist": "artists",
     }
-    raw_results = YTMusic().search(query, filter=filters.get(kind), limit=25)
+    wanted = limit or SEARCH_RESULT_LIMIT
+    # ytmusicapi follows continuations until it has this many, so a larger number
+    # genuinely brings back more rather than re-cutting the same first page.
+    raw_results = YTMusic().search(query, filter=filters.get(kind), limit=wanted)
     results = []
     for raw in raw_results:
         item = format_yt_result(raw)
         if item:
             results.append(item)
-    return results
+    return results[:wanted]
 
 
 def deezer_cover(raw: dict[str, Any]) -> str:
@@ -525,22 +591,87 @@ def format_deezer_result(raw: dict[str, Any], kind: str) -> dict[str, Any]:
     }
 
 
-def search_deezer_type(query: str, kind: str) -> list[dict[str, Any]]:
+def search_deezer_type(query: str, kind: str, limit: int = 0) -> list[dict[str, Any]]:
+    """One page's worth of Deezer results, following pages until the limit is reached.
+
+    Deezer caps a single response at 100 rows, so anything larger is paged with the
+    ``index`` parameter rather than silently truncated.
+    """
     endpoint_kind = "track" if kind == "song" else kind
-    data = api_json(f"https://api.deezer.com/search/{endpoint_kind}", {"q": query, "limit": 12, "output": "json"})
-    return [format_deezer_result(item, kind) for item in data.get("data", [])]
+    wanted = limit or SEARCH_RESULT_LIMIT
+    results: list[dict[str, Any]] = []
+    index = 0
+    while len(results) < wanted:
+        page_size = min(DEEZER_PAGE_SIZE, wanted - len(results))
+        data = api_json(
+            f"https://api.deezer.com/search/{endpoint_kind}",
+            {"q": query, "limit": page_size, "index": index, "output": "json"},
+        )
+        rows = data.get("data") or []
+        results.extend(format_deezer_result(item, kind) for item in rows)
+        if len(rows) < page_size or not data.get("next"):
+            break
+        index += len(rows)
+    return results[:wanted]
 
 
-def search_deezer(query: str, kind: str) -> list[dict[str, Any]]:
+def search_deezer(query: str, kind: str, limit: int = 0) -> list[dict[str, Any]]:
     kinds = [kind] if kind != "all" else ["song", "album", "artist", "playlist"]
     combined: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(search_deezer_type, query, one_kind): one_kind for one_kind in kinds}
+        futures = {pool.submit(search_deezer_type, query, one_kind, limit): one_kind for one_kind in kinds}
         for future in as_completed(futures):
             combined.extend(future.result())
     order = {"song": 0, "video": 1, "album": 2, "artist": 3, "playlist": 4}
     combined.sort(key=lambda item: (order.get(item["kind"], 9), item["title"].casefold()))
     return combined
+
+
+def format_musicdl_result(song_info: Any) -> dict[str, Any] | None:
+    """A musicdl search hit as a downloadable search result, or None if unusable."""
+    try:
+        if not song_info.with_valid_download_url or not isinstance(song_info.download_url, str):
+            return None
+    except Exception:
+        return None
+    payload = musicdl_track_entry(song_info)
+    platform = str(payload.get("client") or "").removesuffix("MusicClient")
+    detail_parts = [
+        part for part in (
+            payload["artist"], payload["album"],
+            format_duration(payload["duration_seconds"]) if payload["duration_seconds"] else "",
+            platform,
+        ) if part
+    ]
+    return {
+        **payload, "detail": " — ".join(detail_parts),
+        "preview_type": "", "preview": "", "token": signer.dumps(payload),
+    }
+
+
+def search_musicdl(query: str, kind: str, limit: int = 0) -> list[dict[str, Any]]:
+    """Search every configured musicdl platform. Only tracks come back from these."""
+    if not MUSICDL_ENABLED:
+        return []
+    if kind not in {"all", "song"}:
+        return []
+    problem = musicdl_source.availability()
+    if problem:
+        raise RuntimeError(problem)
+    wanted = limit or SEARCH_RESULT_LIMIT
+    found = musicdl_source.search(query, MUSICDL_SOURCES, str(STATE_DIR / "musicdl-search"))
+    results: list[dict[str, Any]] = []
+    # Take from each platform in turn so one chatty source cannot fill the whole page.
+    for row in itertools.zip_longest(*found.values()):
+        for song_info in row:
+            if song_info is None:
+                continue
+            item = format_musicdl_result(song_info)
+            if item:
+                results.append(item)
+            if len(results) >= wanted:
+                return results
+    return results
 
 
 def format_duration(seconds: int) -> str:
@@ -550,11 +681,21 @@ def format_duration(seconds: int) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
 
 
+def js_runtime_arguments() -> list[str]:
+    """Tell yt-dlp where our own Deno is.
+
+    YouTube answers with JavaScript challenges yt-dlp cannot solve by itself, so it hands
+    them to Deno. yt-dlp finds a Deno on PATH without help; the copy in RequestCast's
+    tools folder has to be pointed at.
+    """
+    return ["--js-runtimes", f"deno:{DENO}"] if DENO else []
+
+
 def ytdlp_json(url: str, *, playlist_limit: int | None = None) -> dict[str, Any]:
     command = [
         YTDLP, "--ignore-config", "--no-plugin-dirs",
         "--skip-download", "--no-warnings", "--socket-timeout", "30",
-        "--retries", "3",
+        "--retries", "3", *js_runtime_arguments(),
     ]
     if playlist_limit is None:
         command.append("--no-playlist")
@@ -765,13 +906,39 @@ def recent_jobs(limit: int = 12) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def search_sources() -> list[tuple[str, str]]:
+    """The source choices the search form offers, as (value, label)."""
+    choices = [
+        ("both", "YouTube and Deezer"),
+        ("youtube", "YouTube only"),
+        ("deezer", "Deezer only"),
+    ]
+    if MUSICDL_ENABLED:
+        choices.insert(1, ("all", "YouTube, Deezer, and musicdl"))
+        choices.append(("musicdl", "musicdl only"))
+    return choices
+
+
+def requested_search_limit(raw: str) -> int:
+    """How many results this search asked for, falling back to the saved preference."""
+    try:
+        wanted = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return SEARCH_RESULT_LIMIT
+    return config.clamp("search_result_limit", wanted)
+
+
 @app.route("/")
 def index():
     query = request.args.get("q", "").strip()
-    source = request.args.get("source", "both")
+    source = request.args.get("source", "")
     kind = request.args.get("kind", "all")
-    if source not in {"both", "youtube", "deezer"}:
-        source = "both"
+    limit = requested_search_limit(request.args.get("limit", ""))
+    valid_sources = {value for value, _label in search_sources()}
+    if source not in valid_sources:
+        # musicdl searches are opt-in per install, so the saved preference decides
+        # whether the default search includes it.
+        source = "all" if (SEARCH_MUSICDL and "all" in valid_sources) else "both"
     if kind not in {"all", "song", "video", "album", "artist", "playlist"}:
         kind = "all"
     results: list[dict[str, Any]] = []
@@ -789,11 +956,13 @@ def index():
                 errors.append(f"URL lookup failed: {exc}")
         else:
             tasks = []
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                if source in {"both", "youtube"}:
-                    tasks.append(("YouTube", pool.submit(search_youtube, query, kind)))
-                if source in {"both", "deezer"} and kind != "video":
-                    tasks.append(("Deezer", pool.submit(search_deezer, query, kind)))
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                if source in {"both", "all", "youtube"}:
+                    tasks.append(("YouTube", pool.submit(search_youtube, query, kind, limit)))
+                if source in {"both", "all", "deezer"} and kind != "video":
+                    tasks.append(("Deezer", pool.submit(search_deezer, query, kind, limit)))
+                if source in {"all", "musicdl"} and MUSICDL_ENABLED:
+                    tasks.append(("musicdl", pool.submit(search_musicdl, query, kind, limit)))
                 for label, future in tasks:
                     try:
                         results.extend(future.result())
@@ -802,6 +971,10 @@ def index():
     return render_template(
         "index.html", query=query, source=source, kind=kind, results=results,
         errors=errors, jobs=recent_jobs(), url_input=url_input,
+        limit=limit, sources=search_sources(),
+        # A limit set in the settings file or the environment may not be one of the
+        # offered sizes, so it joins the list rather than silently reverting.
+        limit_choices=sorted(set(SEARCH_LIMIT_CHOICES) | {limit, SEARCH_RESULT_LIMIT}),
     )
 
 
@@ -1023,6 +1196,30 @@ def delete_job(job_id: str):
     return redirect(url_for("index"))
 
 
+@app.post("/jobs/<job_id>/retry")
+def retry_job(job_id: str):
+    """Put a finished download back in the queue, keeping its history entry."""
+    require_csrf()
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        abort(404)
+    if not rate_allowed("download", client_ip(), 20, 300):
+        abort(429, "Too many downloads were queued. Please wait a few minutes.")
+    with db_connect() as con:
+        job = con.execute("SELECT state, label FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not job:
+            abort(404)
+        if job["state"] in {"queued", "running"}:
+            flash("That download is already queued.")
+            return redirect(url_for("job_status", job_id=job_id))
+        con.execute(
+            "UPDATE jobs SET state='queued', detail=?, error='', completed=0, attempts=0, updated_at=? "
+            "WHERE id=?",
+            ("Queued again by hand", int(time.time()), job_id),
+        )
+    flash(f"{job['label']} was queued again.")
+    return redirect(url_for("job_status", job_id=job_id))
+
+
 def update_job(job_id: str, **fields: Any) -> None:
     if not fields:
         return
@@ -1041,11 +1238,20 @@ def claim_job() -> sqlite3.Row | None:
             con.commit()
             return None
         con.execute(
-            "UPDATE jobs SET state='running', detail='Preparing download', updated_at=? WHERE id=?",
+            "UPDATE jobs SET state='running', detail='Preparing download', "
+            "attempts=attempts+1, updated_at=? WHERE id=?",
             (int(time.time()), row["id"]),
         )
         con.commit()
         return row
+
+
+def job_attempts(job: sqlite3.Row) -> int:
+    """How many times this job has been started, including the run in progress."""
+    try:
+        return int(job["attempts"] or 0) + 1
+    except (IndexError, KeyError, TypeError, ValueError):
+        return 1
 
 
 def clean_text(value: str) -> str:
@@ -2482,7 +2688,152 @@ def download_via_musicdl(track: dict[str, Any], temp_dir: Path) -> Path:
     )
 
 
-def download_one(track: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
+def looks_rate_limited(message: str) -> bool:
+    """True when a failure reads like the site pushing back rather than a dead track.
+
+    Bulk runs — a channel, a discography, a playlist import — hit this in batches: a
+    stretch of tracks fails with 403 or "video unavailable" and the very same tracks
+    download fine once the queue slows down.
+    """
+    lowered = str(message).lower()
+    return any(sign in lowered for sign in RATE_LIMIT_SIGNS)
+
+
+def describe_download_error(message: str) -> str:
+    """Say what a raw downloader error means, so the history is worth reading."""
+    text = " ".join(str(message).split())
+    lowered = text.lower()
+    if "javascript runtime" in lowered or "js runtime" in lowered or "jsi" in lowered:
+        return f"{text} (YouTube needs a JavaScript runtime. Open Preferences and install the download tools, which include Deno.)"
+    if not DENO and ("403" in lowered or "forbidden" in lowered or "nsig" in lowered or "signature" in lowered):
+        return f"{text} (Deno is not installed. YouTube's JavaScript challenges cannot be answered without it, which shows up as 403 and missing formats. Install the download tools from Preferences.)"
+    if "403" in lowered or "forbidden" in lowered:
+        return f"{text} (YouTube refused the download. This is usually rate limiting during a bulk run: it clears on a retry, a longer gap between downloads, or a newer yt-dlp.)"
+    if "sign in to confirm" in lowered or "not a bot" in lowered:
+        return f"{text} (YouTube asked the downloader to prove it is not a bot, which is rate limiting. A longer gap between downloads clears it.)"
+    if "429" in lowered or "too many requests" in lowered:
+        return f"{text} (Too many requests were made too quickly. Raise the gap between downloads in Preferences.)"
+    if "video unavailable" in lowered or "unavailable" in lowered:
+        return f"{text} (The video did not load. During a bulk import this is usually temporary rather than a missing track.)"
+    return text
+
+
+def retry_delay_for(retry: int) -> int:
+    """Seconds to wait before retry number ``retry``, doubling each time."""
+    if DOWNLOAD_RETRY_DELAY <= 0:
+        return 0
+    ceiling = max(RATE_LIMIT_COOLDOWN, DOWNLOAD_RETRY_DELAY)
+    return int(min(DOWNLOAD_RETRY_DELAY * (2 ** max(0, retry - 1)), ceiling))
+
+
+def pause_job(job_id: str, seconds: int, reason: str) -> None:
+    """Wait, saying on the status page why the job is waiting."""
+    if seconds <= 0:
+        return
+    update_job(job_id, detail=f"{reason} Waiting {seconds} seconds.")
+    time.sleep(seconds)
+
+
+def pace_downloads() -> None:
+    """Leave a gap between tracks so a long queue does not trip the site's rate limits."""
+    if DOWNLOAD_GAP_SECONDS > 0:
+        time.sleep(DOWNLOAD_GAP_SECONDS)
+
+
+def cool_down(job_id: str, multiplier: int = 1, reason: str = "") -> None:
+    """Stop downloading for a while after a run of rate-limited failures."""
+    seconds = int(min(RATE_LIMIT_COOLDOWN * max(1, multiplier), 3600))
+    pause_job(
+        job_id, seconds,
+        reason or "Several downloads in a row were refused, which means the site is rate limiting.",
+    )
+
+
+def download_track(
+    track: dict[str, Any], job_id: str, label: str, prefix: str = "", attempts: int = 0
+) -> tuple[str, dict[str, Any]]:
+    """Download one track, retrying as configured. Raises the last error if all fail."""
+    attempts = attempts or DOWNLOAD_RETRIES + 1
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            status, _path, media = download_one(track, attempt - 1)
+            return status, media
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            pause_job(
+                job_id, retry_delay_for(attempt),
+                f"{prefix}{label} failed on attempt {attempt} of {attempts}: {exc}. Retrying.",
+            )
+    raise last_error if last_error else RuntimeError("The download failed for an unknown reason.")
+
+
+def run_downloads(tracks: list[dict[str, Any]], job_id: str) -> tuple[int, str, list[str]]:
+    """Download every track, pacing the queue and retrying what the site refuses.
+
+    Returns the number that succeeded, the first AzuraCast request ID seen, and one
+    message per track that never made it.
+    """
+    completed = 0
+    first_request_id = ""
+    failures: list[tuple[dict[str, Any], str, str]] = []
+    streak = 0
+    cooldowns = 0
+    total = len(tracks)
+    for number, track in enumerate(tracks, 1):
+        label = f"{track.get('artist', 'Unknown Artist')} — {track.get('title', 'Untitled')}"
+        if number > 1:
+            pace_downloads()
+        update_job(job_id, detail=f"Downloading {number} of {total}: {label}")
+        try:
+            status, media = download_track(track, job_id, label, f"Track {number} of {total}: ")
+        except Exception as exc:
+            failures.append((track, label, str(exc)))
+            if looks_rate_limited(str(exc)):
+                streak += 1
+                if streak >= RATE_LIMIT_STREAK and number < total:
+                    cooldowns += 1
+                    cool_down(job_id, cooldowns)
+                    streak = 0
+            else:
+                streak = 0
+            continue
+        streak = 0
+        completed += 1
+        if not first_request_id:
+            first_request_id = str(media.get("unique_id") or "")
+        update_job(job_id, completed=completed, detail=f"{status.title()}: {label}")
+
+    # Tracks refused during a bulk run usually download fine a few minutes later, so
+    # everything that failed gets one more pass once the queue has been quiet.
+    if failures and DOWNLOAD_RETRIES > 0 and any(looks_rate_limited(error) for _t, _l, error in failures):
+        cool_down(
+            job_id, cooldowns + 1,
+            f"{len(failures)} track(s) were refused. Waiting before one final pass over them.",
+        )
+        remaining: list[tuple[dict[str, Any], str, str]] = []
+        for number, (track, label, _error) in enumerate(failures, 1):
+            if number > 1:
+                pace_downloads()
+            update_job(job_id, detail=f"Final pass {number} of {len(failures)}: {label}")
+            try:
+                status, media = download_track(track, job_id, label, "Final pass: ", attempts=1)
+            except Exception as exc:
+                remaining.append((track, label, str(exc)))
+                continue
+            completed += 1
+            if not first_request_id:
+                first_request_id = str(media.get("unique_id") or "")
+            update_job(job_id, completed=completed, detail=f"{status.title()} on the final pass: {label}")
+        failures = remaining
+
+    errors = [f"{label}: {describe_download_error(error)}" for _track, label, error in failures]
+    return completed, first_request_id, errors
+
+
+def download_one(track: dict[str, Any], attempt: int = 0) -> tuple[str, Path, dict[str, Any]]:
     video_id = str(track.get("video_id") or "")
     source_id = safe_filename(str(track.get("source_id") or video_id), video_id)
     stem = f"{safe_filename(track.get('artist', 'Unknown Artist'))} - {safe_filename(track.get('title', 'Untitled'))} [{track['source']}-{source_id}]"
@@ -2510,18 +2861,40 @@ def download_one(track: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
         if prepared is None:
             if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
                 raise RuntimeError("The selected result has no valid YouTube audio source.")
-            if not YTDLP:
-                raise RuntimeError(
-                    "yt-dlp was not found. Open Settings and install the download tools, "
-                    "or put yt-dlp on your PATH."
-                )
+            if not YTDLP or not DENO:
+                # The tools install themselves in the background, so a download that
+                # arrives first waits for that rather than failing outright. A missing
+                # Deno is not fatal on its own: yt-dlp still works, with fewer formats.
+                install_error = ""
+                try:
+                    ensure_tools_installed()
+                except Exception as exc:
+                    install_error = str(exc)
+                if not YTDLP:
+                    raise RuntimeError(
+                        f"yt-dlp is missing and could not be installed: {install_error}."
+                        if install_error else
+                        "yt-dlp was not found. Open Preferences and install the download "
+                        "tools, or put yt-dlp on your PATH."
+                    )
             command = [
                 YTDLP, "--ignore-config", "--no-plugin-dirs",
                 "--no-playlist", "--no-progress", "--no-warnings", "--socket-timeout", "30",
-                "--retries", "5", "--fragment-retries", "5", "--sleep-requests", "1",
+                "--retries", str(max(5, DOWNLOAD_RETRIES + 1)),
+                "--fragment-retries", str(max(5, DOWNLOAD_RETRIES + 1)),
+                "--retry-sleep", f"exp={max(1, DOWNLOAD_RETRY_DELAY // 4)}:{max(4, DOWNLOAD_RETRY_DELAY)}",
+                "--sleep-requests", str(max(1, DOWNLOAD_GAP_SECONDS)),
                 "--max-filesize", "500M", "--match-filter", "!is_live & duration < 7200",
-                "-f", "bestaudio/best",
-                "-o", str(temp_dir / "%(id)s.%(ext)s"), f"https://www.youtube.com/watch?v={video_id}",
+                "-f", "bestaudio/best", *js_runtime_arguments(),
+            ]
+            # A 403 or "unavailable" from one YouTube client is often fine from another,
+            # so each retry asks as a different one.
+            player_clients = YTDLP_PLAYER_CLIENTS[attempt % len(YTDLP_PLAYER_CLIENTS)]
+            if player_clients:
+                command += ["--extractor-args", f"youtube:player_client={player_clients}"]
+            command += [
+                "-o", str(temp_dir / "%(id)s.%(ext)s"),
+                f"https://www.youtube.com/watch?v={video_id}",
             ]
             result = subprocess.run(command, capture_output=True, text=True, timeout=1800, check=False)
             if result.returncode != 0:
@@ -2582,19 +2955,8 @@ def process_job(job: sqlite3.Row) -> None:
     if not tracks:
         raise RuntimeError("\n".join(errors) or "This result did not contain any downloadable tracks.")
     update_job(job_id, total=len(tracks), detail=f"Found {len(tracks)} track(s)")
-    completed = 0
-    first_request_id = ""
-    for number, track in enumerate(tracks, 1):
-        label = f"{track.get('artist', 'Unknown Artist')} — {track.get('title', 'Untitled')}"
-        update_job(job_id, detail=f"Downloading {number} of {len(tracks)}: {label}")
-        try:
-            status, _path, media = download_one(track)
-            completed += 1
-            if not first_request_id:
-                first_request_id = str(media.get("unique_id") or "")
-            update_job(job_id, completed=completed, detail=f"{status.title()}: {label}")
-        except Exception as exc:
-            errors.append(f"{label}: {exc}")
+    completed, first_request_id, download_errors = run_downloads(tracks, job_id)
+    errors.extend(download_errors)
     if completed == 0:
         raise RuntimeError("; ".join(errors) or "No tracks were downloaded.")
     if AZURACAST_ENABLED:
@@ -2618,6 +2980,22 @@ def process_job(job: sqlite3.Row) -> None:
     update_job(job_id, state="completed", detail=detail, error="\n".join(errors)[:8000])
 
 
+def fail_or_requeue(job: sqlite3.Row, exc: Exception) -> None:
+    """Put a failed job back in the queue while it has retries left, or record the failure."""
+    attempts = job_attempts(job)
+    message = describe_download_error(str(exc))
+    if attempts <= JOB_RETRY_LIMIT:
+        update_job(
+            job["id"], state="queued",
+            detail=f"Attempt {attempts} failed. Retrying (attempt {attempts + 1} of {JOB_RETRY_LIMIT + 1}).",
+            error=message[:8000],
+        )
+        # Let the site settle before the queue picks this job up again.
+        pause_job(job["id"], retry_delay_for(attempts), f"Attempt {attempts} failed: {message}")
+        return
+    update_job(job["id"], state="failed", detail="Download failed", error=message[:8000])
+
+
 def worker_loop() -> None:
     while True:
         if not config.is_configured(SETTINGS):
@@ -2634,7 +3012,104 @@ def worker_loop() -> None:
         try:
             process_job(job)
         except Exception as exc:
-            update_job(job["id"], state="failed", detail="Download failed", error=str(exc)[:8000])
+            fail_or_requeue(job, exc)
+
+
+# Which setting records where each self-updating tool lives.
+TOOL_PATH_SETTINGS = {"yt-dlp": "ytdlp_path", "deno": "deno_path"}
+_tool_install_lock = threading.Lock()
+
+
+def ensure_tools_installed(progress: Any = None) -> dict[str, str]:
+    """Fetch any missing download tool without waiting to be asked.
+
+    yt-dlp, ffmpeg, and Deno are what make a download work at all, so RequestCast
+    installs them itself rather than leaving someone to discover a broken download and
+    a button. Anything already present is left alone.
+    """
+    if WORKER_DISABLED or not tools.installable_tools(SETTINGS):
+        return {}
+    with _tool_install_lock:
+        if not tools.installable_tools(SETTINGS):
+            return {}
+        updates = tools.install_missing(SETTINGS, progress)
+        if updates:
+            merged = {**SETTINGS, **updates}
+            if config.is_configured(merged):
+                config.save(merged)
+            apply_settings(merged)
+        return updates
+
+
+def save_tool_paths(results: list[dict[str, Any]]) -> None:
+    """Remember where an update put a tool, so the next run uses the new copy."""
+    updates = {
+        TOOL_PATH_SETTINGS[str(item.get("name"))]: str(item.get("path"))
+        for item in results
+        if item.get("path") and str(item.get("name")) in TOOL_PATH_SETTINGS
+    }
+    if not updates:
+        return
+    merged = {**SETTINGS, **updates}
+    if config.is_configured(merged):
+        config.save(merged)
+    apply_settings(merged)
+
+
+def tool_update_loop() -> None:
+    """Keep yt-dlp and musicdl current in the background.
+
+    Both read sites that change under them, and an out-of-date yt-dlp is the most common
+    cause of downloads that fail with 403 while the same track plays fine in a browser.
+    """
+    while True:
+        if not config.is_configured(SETTINGS):
+            time.sleep(30)
+            continue
+        # Missing tools are installed whether or not automatic updating is on: without
+        # them nothing downloads at all.
+        try:
+            installed = ensure_tools_installed()
+        except Exception:
+            installed = {}
+        if installed:
+            tools.record_update_check(
+                STATE_DIR,
+                [{"name": name, "status": "updated", "message": f"Installed {path}."}
+                 for name, path in installed.items()],
+            )
+        if not AUTO_UPDATE_TOOLS:
+            time.sleep(600)
+            continue
+        due = tools.last_update_check(STATE_DIR) + AUTO_UPDATE_INTERVAL_HOURS * 3600
+        if time.time() < due:
+            time.sleep(min(3600, max(60, due - time.time())))
+            continue
+        try:
+            results = tools.update_all(SETTINGS)
+        except Exception:
+            # A failed check must never stop the program; the next one tries again.
+            results = []
+        tools.record_update_check(STATE_DIR, results)
+        save_tool_paths(results)
+
+
+def tool_update_context() -> dict[str, Any]:
+    """What the preferences page says about the tools and when they were last checked."""
+    versions: list[tuple[str, str]] = []
+    ytdlp_path = tools.find_tool("yt-dlp", SETTINGS.get("ytdlp_path", ""))
+    versions.append(("yt-dlp", tools.ytdlp_version(ytdlp_path) or "not installed"))
+    deno_path = tools.find_tool("deno", SETTINGS.get("deno_path", ""))
+    versions.append((
+        "Deno (JavaScript runtime for YouTube)",
+        tools.deno_version(deno_path) or "not installed",
+    ))
+    versions.append(("musicdl", tools.installed_package_version("musicdl") or "not installed"))
+    checked = tools.last_update_check(STATE_DIR)
+    return {
+        "tool_versions": versions,
+        "last_update_check": time.strftime("%Y-%m-%d %H:%M", time.localtime(checked)) if checked else "",
+    }
 
 
 def settings_page():
@@ -2658,8 +3133,20 @@ def settings_page():
             "deezer_arl": request.form.get("deezer_arl", "").strip(),
             "musicdl_enabled": bool(request.form.get("musicdl_enabled")),
             "musicdl_sources": request.form.get("musicdl_sources", "").strip() or musicdl_source.DEFAULT_SOURCES,
+            "search_musicdl": bool(request.form.get("search_musicdl")),
+            "auto_update_tools": bool(request.form.get("auto_update_tools")),
             "diagnostics_enabled": bool(request.form.get("diagnostics_enabled")),
         }
+        # Numbers are clamped rather than rejected, so a typo cannot lock anyone out of
+        # their own settings page.
+        for key in (
+            "search_result_limit", "download_retries", "download_retry_delay",
+            "download_gap_seconds", "rate_limit_cooldown", "job_retry_limit",
+            "auto_update_interval_hours",
+        ):
+            submitted[key] = config.clamp(
+                key, request.form.get(key, "").strip() or settings.get(key, config.FIELDS[key])
+            )
         # Serving plain HTTP on this machine means the session cookie cannot be Secure.
         submitted["secure_cookies"] = submitted["bind_host"] not in config.LOOPBACK_HOSTS
         password = request.form.get("password", "")
@@ -2679,6 +3166,7 @@ def settings_page():
                 first_run=first_run, missing_tools=tools.missing_tools(settings),
                 can_auto_install=tools.can_auto_install(), config_path=str(config.config_path()),
                 form_endpoint="setup" if first_run else "preferences",
+                **tool_update_context(),
             ), 400
         merged = {**settings, **submitted}
         if password:
@@ -2707,6 +3195,7 @@ def settings_page():
         missing_tools=tools.missing_tools(settings),
         can_auto_install=tools.can_auto_install(), config_path=str(config.config_path()),
         form_endpoint="setup" if first_run else "preferences",
+        **tool_update_context(),
     )
 
 
@@ -2752,6 +3241,22 @@ def validate_setup(
     return problems
 
 
+@app.post("/setup/tools/update")
+def update_tools():
+    """Check for and install newer yt-dlp and musicdl releases now."""
+    require_csrf()
+    try:
+        results = tools.update_all(SETTINGS)
+    except Exception as exc:
+        flash(f"The tools could not be updated: {exc}")
+        return redirect(url_for("preferences"))
+    tools.record_update_check(STATE_DIR, results)
+    save_tool_paths(results)
+    for item in results:
+        flash(str(item.get("message") or ""))
+    return redirect(url_for("preferences"))
+
+
 @app.post("/setup/tools")
 def setup_tools():
     """Fetch yt-dlp and ffmpeg into the program folder."""
@@ -2788,6 +3293,11 @@ _install_youtube_collection_support()
 apply_settings()
 
 worker = None
-if os.environ.get("REQUESTCAST_DISABLE_WORKER") != "1" and os.environ.get("ADDTO_DISABLE_WORKER") != "1":
+updater = None
+if not WORKER_DISABLED:
     worker = threading.Thread(target=worker_loop, name="download-worker", daemon=True)
     worker.start()
+    # Keeping yt-dlp and musicdl current is what stops downloads failing against sites
+    # that have moved on. It runs beside the worker so a check never delays a download.
+    updater = threading.Thread(target=tool_update_loop, name="tool-updater", daemon=True)
+    updater.start()

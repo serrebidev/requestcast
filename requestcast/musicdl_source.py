@@ -273,6 +273,27 @@ def download_payload(payload: dict[str, Any], temp_dir: Path) -> Path:
     return _download_song_info(song_info, temp_dir)
 
 
+def search(keyword: str, sources: list[str], work_dir: str) -> dict[str, list[Any]]:
+    """Search the configured platforms by name, as ``{source: [SongInfo, ...]}``.
+
+    Used by the search page when musicdl is included as a source. Every configured
+    platform is queried, so this is slower than the YouTube or Deezer searches.
+    """
+    keyword = keyword.strip()
+    if not keyword:
+        return {}
+    client = get_music_client(sources, work_dir)
+    try:
+        with _quiet():
+            results = client.search(keyword=keyword)
+    except Exception as exc:
+        raise MusicdlError(f"musicdl could not search: {exc}") from exc
+    return {
+        str(source): list(songs or [])
+        for source, songs in (results or {}).items()
+    }
+
+
 def _candidate_score(song_info: Any, wanted_title: str, duration_s: int, match_key: Callable[[Any], str]) -> tuple | None:
     title_key = match_key(song_info.get("song_name"))
     if not title_key or not wanted_title:

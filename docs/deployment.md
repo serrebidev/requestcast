@@ -15,6 +15,13 @@ apt install ffmpeg
 /opt/requestcast/.venv/bin/pip install yt-dlp
 ```
 
+RequestCast downloads yt-dlp and Deno into `tools/` beside the program itself if they are
+missing, and keeps them current, so those two are optional here. Deno is what answers
+YouTube's JavaScript challenges: without it YouTube downloads lose formats and fail with
+403. On a service whose `ProtectSystem` makes `/opt/requestcast` read-only, install Deno
+system-wide instead (`curl -fsSL https://deno.land/install.sh | sh`) and point
+`REQUESTCAST_DENO` at it, or the automatic install has nowhere to write.
+
 ## Generate the secrets
 
 Never reuse a key from anywhere else, and keep the file out of version control.
@@ -65,6 +72,25 @@ REQUESTCAST_DEEZER_ARL=...
 # comma-separated musicdl client names.
 REQUESTCAST_MUSICDL_ENABLED=1
 REQUESTCAST_MUSICDL_SOURCES=MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient
+
+# Optional. How much a search brings back, per source and per result type (5 to 200),
+# and whether musicdl's platforms are searched by name as well.
+REQUESTCAST_SEARCH_LIMIT=50
+REQUESTCAST_SEARCH_MUSICDL=0
+
+# Optional. Bulk imports get refused in batches by YouTube (403, "video unavailable")
+# on tracks that download fine later. These control how patiently that is retried.
+REQUESTCAST_DOWNLOAD_RETRIES=2
+REQUESTCAST_DOWNLOAD_RETRY_DELAY=20
+REQUESTCAST_DOWNLOAD_GAP=2
+REQUESTCAST_RATE_LIMIT_COOLDOWN=180
+REQUESTCAST_JOB_RETRY_LIMIT=1
+
+# Optional. Deno runs the JavaScript YouTube demands; yt-dlp finds one on PATH by
+# itself, so this is only needed for a copy that is not on PATH.
+REQUESTCAST_DENO=/usr/local/bin/deno
+REQUESTCAST_AUTO_UPDATE_TOOLS=1
+REQUESTCAST_AUTO_UPDATE_HOURS=24
 ```
 
 Setting `REQUESTCAST_AZURACAST_API_KEY` enables the AzuraCast integration.

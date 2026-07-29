@@ -8,7 +8,13 @@ It runs two ways from the same code: a **portable Windows program** you double-c
 
 ## What it does
 
-- Search YouTube and Deezer from one box, or paste a URL to a track, album, playlist, or artist
+- Search YouTube, Deezer, and optionally every musicdl platform from one box, or paste a URL
+  to a track, album, playlist, or artist. How many results each source returns is a setting,
+  and every search can ask for a different number
+- **Retries you can tune.** Bulk imports get refused in batches by YouTube — 403 and
+  "video unavailable" on tracks that download fine later. Extra attempts per track, a gap
+  between tracks, a cooldown after repeated refusals, a final pass over what failed, and a
+  retry button on every finished download
 - Open any **artist or YouTube channel** to take everything, or tick only the releases,
   albums, and videos you actually want
 - Upload a **TXT, XLSX, or PDF list** of music and it indexes the whole thing, then works through it
@@ -27,12 +33,21 @@ It runs two ways from the same code: a **portable Windows program** you double-c
   verify the audio packets come out bit-identical
 - Writes proper tags and cover art for MP3, MP4/M4A, FLAC, Ogg, and WAV/AIFF
 - Optionally uploads each finished file to AzuraCast and adds it to a request playlist
+- **Installs and updates its own tools.** yt-dlp, ffmpeg, and Deno are fetched in the
+  background on first run, and yt-dlp, Deno, and musicdl are kept up to date after that
 
 ## Requirements
 
 - Python 3.11 or newer, if running from source
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [ffmpeg](https://ffmpeg.org/) — on Windows the
-  setup page offers to download both into a `tools` folder beside the program
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp), [ffmpeg](https://ffmpeg.org/), and
+  [Deno](https://deno.com/) — RequestCast downloads yt-dlp and Deno itself on every platform,
+  and ffmpeg too on Windows, into a `tools` folder beside the program. Install ffmpeg with
+  your package manager elsewhere
+
+Deno is not optional for YouTube. YouTube answers with JavaScript challenges that yt-dlp
+cannot solve on its own, so it hands them to an external JavaScript runtime and enables Deno
+by default. Without one, YouTube downloads lose the better formats and fail with 403 errors
+that retrying will not clear.
 
 ## Portable Windows program
 
@@ -95,6 +110,19 @@ REQUESTCAST_DEEZER_ARL=...      # optional Deezer subscriber ARL
 REQUESTCAST_MUSICDL_ENABLED=1   # optional; musicdl fallback between Deezer and YouTube
 REQUESTCAST_MUSICDL_SOURCES=MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient
 REQUESTCAST_DIAGNOSTICS=1       # optional; collects a support bundle, off by default
+
+REQUESTCAST_SEARCH_LIMIT=50     # results per source and per result type, 5 to 200
+REQUESTCAST_SEARCH_MUSICDL=1    # optional; include musicdl platforms in name searches
+
+REQUESTCAST_DOWNLOAD_RETRIES=2         # extra attempts per track, 0 to 10
+REQUESTCAST_DOWNLOAD_RETRY_DELAY=20    # seconds before the first retry; doubles after that
+REQUESTCAST_DOWNLOAD_GAP=2             # seconds between tracks in a queue, 0 to 120
+REQUESTCAST_RATE_LIMIT_COOLDOWN=180    # pause after repeated refusals, 0 to 3600
+REQUESTCAST_JOB_RETRY_LIMIT=1          # times to requeue a whole failed download
+
+REQUESTCAST_DENO=/usr/local/bin/deno   # optional; found on PATH or installed automatically
+REQUESTCAST_AUTO_UPDATE_TOOLS=1        # keep yt-dlp, Deno, and musicdl current
+REQUESTCAST_AUTO_UPDATE_HOURS=24       # hours between update checks, 1 to 720
 ```
 
 Setting `REQUESTCAST_AZURACAST_API_KEY` turns the AzuraCast integration on. Serve it with
@@ -134,7 +162,8 @@ python tests/run_all.py
 
 This includes the Deezer quality, decryption, source-preference, YouTube-fallback, setup,
 configuration, import, playlist-format, artist-browsing, job-history, download-permission,
-default-browser, diagnostics, request, upload, audio-preservation, and URL-input checks. The
+default-browser, diagnostics, request, upload, audio-preservation, URL-input, search-limit,
+download-retry, and tool-update checks. The
 remaining scripts under `tests/` are manual integration checks: they require either the private
 playlist fixtures named in the script or a live RequestCast/AzuraCast deployment.
 
@@ -147,5 +176,5 @@ widgets. It is built to be usable with a screen reader.
 
 MIT — see [LICENSE](LICENSE).
 
-yt-dlp and ffmpeg are separate programs under their own licences; RequestCast runs them, and
-does not include them.
+yt-dlp, ffmpeg, and Deno are separate programs under their own licences; RequestCast runs
+them, and does not include them.

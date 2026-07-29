@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Add music</h1>
-<p>Search by name or paste a YouTube or Deezer link. RequestCast keeps the best available audio and adds it to the request library. Artists and YouTube channels can be opened to pick individual releases, albums, or videos.</p>
+<p>Search by name or paste a YouTube, Deezer, or other supported music link. RequestCast keeps the best available audio and adds it to the request library. Artists and YouTube channels can be opened to pick individual releases, albums, or videos.</p>
 
 <form method="get" class="search-form" role="search">
   <label for="q">Search or paste a URL</label>
@@ -10,9 +10,9 @@
     <div>
       <label for="source">Search source</label>
       <select id="source" name="source">
-        <option value="both"{% if source == 'both' %} selected{% endif %}>YouTube and Deezer</option>
-        <option value="youtube"{% if source == 'youtube' %} selected{% endif %}>YouTube only</option>
-        <option value="deezer"{% if source == 'deezer' %} selected{% endif %}>Deezer only</option>
+        {% for value, label in sources %}
+        <option value="{{ value }}"{% if source == value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
       </select>
     </div>
     <div>
@@ -23,7 +23,16 @@
         {% endfor %}
       </select>
     </div>
+    <div>
+      <label for="limit">Results per source</label>
+      <select id="limit" name="limit">
+        {% for value in limit_choices %}
+        <option value="{{ value }}"{% if limit == value %} selected{% endif %}>{{ value }} results</option>
+        {% endfor %}
+      </select>
+    </div>
   </div>
+  <p class="hint">Each source and result type returns up to this many, so "Everything" across both sources brings back several times this number. Larger searches take longer.</p>
   <button type="submit">Search or open URL</button>
 </form>
 

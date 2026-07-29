@@ -8,11 +8,19 @@
     <dt>Status</dt><dd>{{ job['state'] }}</dd>
     {% if job['total'] %}<dt>Progress</dt><dd>{{ job['completed'] }} of {{ job['total'] }} tracks</dd>{% endif %}
     <dt>Current activity</dt><dd>{{ job['detail'] }}</dd>
+    {% if job['attempts'] and job['attempts'] > 1 %}<dt>Attempts</dt><dd>{{ job['attempts'] }}</dd>{% endif %}
   </dl>
   {% if job['error'] %}<h3>Problems</h3><pre class="error">{{ job['error'] }}</pre>{% endif %}
   {% if job['state'] in ['queued','running'] %}<p>Select Refresh status for updates.</p>{% endif %}
   <p><a class="button" href="{{ url_for('job_status', job_id=job['id']) }}">Refresh status</a> <a href="{{ url_for('index') }}">Return to search</a></p>
   {% if job['state'] not in ['queued','running'] %}
+  <form method="post" action="{{ url_for('retry_job', job_id=job['id']) }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <button type="submit">Try this download again</button>
+  </form>
+  <p class="hint">Queues the same download again. Tracks that already arrived are recognised
+    and skipped, so a retry only fetches what is missing. Downloads refused with 403 or
+    "video unavailable" during a large batch usually succeed on a later try.</p>
   <form method="post" action="{{ url_for('delete_job', job_id=job['id']) }}">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}">
     <button type="submit" class="secondary">Remove this download from the history</button>
