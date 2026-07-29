@@ -92,6 +92,7 @@ jobs:
             'tests/test_youtube_collections.py',
             'tests/test_browser_and_diagnostics.py',
             'tests/test_download_permissions.py',
+            'tests/test_musicdl_source.py',
             'tests/test_playlist_import.py',
             'tests/test_large_import.py'
           )

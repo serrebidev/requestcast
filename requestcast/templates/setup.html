@@ -71,7 +71,19 @@
   <label for="deezer_arl">Deezer ARL cookie (optional)</label>
   <input id="deezer_arl" name="deezer_arl" type="password"
          value="{{ settings.deezer_arl }}" autocomplete="off">
-  <p class="hint">Uses Deezer first: FLAC, then MP3. Falls back to YouTube. Stored locally.</p>
+  <p class="hint">Uses Deezer first: FLAC, then MP3. Falls back to musicdl, then YouTube. Stored locally.</p>
+
+  <h2>musicdl</h2>
+  <label for="musicdl_enabled">
+    <input id="musicdl_enabled" name="musicdl_enabled" type="checkbox" value="1"
+           {% if settings.musicdl_enabled %}checked{% endif %}>
+    Use musicdl as a fallback source and for other platforms' URLs
+  </label>
+  <label for="musicdl_sources">musicdl sources (comma-separated client names)</label>
+  <input id="musicdl_sources" name="musicdl_sources" type="text"
+         value="{{ settings.musicdl_sources }}" autocomplete="off" spellcheck="false">
+  <p class="hint">Tried between Deezer and YouTube, for example
+    MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient.</p>
 
   <h2>Access</h2>
   <label for="password">{% if first_run %}Password{% else %}New password{% endif %}</label>

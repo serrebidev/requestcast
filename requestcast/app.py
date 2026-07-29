@@ -36,7 +36,7 @@ from pypdf import PdfReader
 from werkzeug.middleware.proxy_fix import ProxyFix
 from ytmusicapi import YTMusic
 
-from . import config, deezer, permissions, tools
+from . import config, deezer, musicdl_source, permissions, tools
 
 
 HTTP_TIMEOUT = (10, 30)
@@ -103,6 +103,8 @@ ADMIN_PASSWORD_SALT = b""
 ADMIN_PASSWORD_HASH = b""
 DEEZER: deezer.DeezerClient | None = None
 DEEZER_ERROR = ""
+MUSICDL_ENABLED = False
+MUSICDL_SOURCES: list[str] = []
 signer: URLSafeTimedSerializer | None = None
 
 
@@ -117,6 +119,7 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     global REQUEST_PLAYLIST_ID, UPLOAD_DIR, SECRET_KEY, PASSWORD_SALT, PASSWORD_HASH
     global ADMIN_PASSWORD_SALT, ADMIN_PASSWORD_HASH, signer
     global DEEZER, DEEZER_ERROR
+    global MUSICDL_ENABLED, MUSICDL_SOURCES
 
     SETTINGS = new_settings if new_settings is not None else config.load()
     STATE_DIR = Path(SETTINGS["state_dir"])
@@ -153,6 +156,16 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
             DEEZER = deezer.DeezerClient(deezer_arl)
         except Exception as exc:
             DEEZER_ERROR = str(exc)
+
+    # musicdl sits between Deezer and YouTube as a download fallback and parses the
+    # other platforms' URLs. Importing it is slow, so availability is checked lazily
+    # on first use rather than here.
+    MUSICDL_ENABLED = bool(SETTINGS.get("musicdl_enabled"))
+    MUSICDL_SOURCES = [
+        name.strip()
+        for name in str(SETTINGS.get("musicdl_sources", "")).split(",")
+        if name.strip()
+    ]
 
     app.secret_key = SECRET_KEY or "setup-mode-only"
     # Secure by default. The portable build turns this off when it saves a loopback
@@ -650,23 +663,87 @@ def deezer_url_result(value: str) -> dict[str, Any]:
     return format_deezer_result(raw, "song" if content_kind == "track" else content_kind)
 
 
+def musicdl_track_entry(song_info: Any) -> dict[str, Any]:
+    """Shape a musicdl SongInfo as a track, keeping the download data musicdl needs."""
+    identifier = str(song_info.get("identifier") or "")
+    return {
+        "source": "musicdl", "kind": "song", "id": identifier,
+        "source_id": identifier, "video_id": "",
+        "title": clean_text(str(song_info.get("song_name") or "")) or "Untitled",
+        "artist": clean_text(str(song_info.get("singers") or "")) or "Unknown Artist",
+        "album": clean_text(str(song_info.get("album") or "")),
+        "duration_seconds": int(song_info.get("duration_s") or 0),
+        "track_number": 0, "disc_number": 0, "year": "", "isrc": "",
+        "cover": str(song_info.get("cover_url") or ""),
+        "musicdl": musicdl_source.song_info_to_payload(song_info),
+    }
+
+
+def musicdl_url_result(value: str, client_name: str) -> dict[str, Any]:
+    """Resolve a URL from one of the platforms musicdl supports."""
+    if not MUSICDL_ENABLED:
+        raise RuntimeError("musicdl support is turned off in Settings.")
+    problem = musicdl_source.availability()
+    if problem:
+        raise RuntimeError(problem)
+    song_infos = musicdl_source.parse_url(value, client_name, str(STATE_DIR / "musicdl-parse"))
+    tracks = []
+    for song_info in song_infos:
+        try:
+            tracks.append(musicdl_track_entry(song_info))
+        except musicdl_source.MusicdlError:
+            continue
+    if not tracks:
+        raise RuntimeError("That URL did not produce any tracks RequestCast can store.")
+    platform = client_name.removesuffix("MusicClient")
+    if len(tracks) == 1:
+        track = tracks[0]
+        payload = dict(track)
+        detail = " — ".join(
+            part for part in (track["artist"], track["album"], format_duration(track["duration_seconds"])) if part
+        )
+        return {
+            **payload, "detail": detail, "preview_type": "", "preview": "",
+            "token": signer.dumps(payload),
+        }
+    # A collection is re-parsed when the job runs, so the token stays small.
+    cover = next((track["cover"] for track in tracks if track["cover"]), "")
+    payload = {
+        "source": "musicdl", "kind": "playlist", "id": value, "url": value,
+        "client": client_name, "title": f"{platform} collection",
+        "artist": "", "cover": cover, "url_playlist": True,
+    }
+    return {
+        **payload, "detail": f"{platform} — {len(tracks)} tracks",
+        "preview_type": "", "preview": "", "token": signer.dumps(payload),
+    }
+
+
 def looks_like_media_url(value: str) -> bool:
     lowered = value.strip().lower()
     return "://" in lowered or lowered.startswith(
         ("youtube.com/", "www.youtube.com/", "m.youtube.com/", "music.youtube.com/", "youtu.be/", "deezer.com/", "www.deezer.com/")
+        + tuple(f"{host}/" for host in musicdl_source.URL_HOST_PREFIXES)
     )
 
 
 def resolve_media_url(value: str) -> dict[str, Any]:
     parsed = urlparse(value if "://" in value else f"https://{value}")
     if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
-        raise RuntimeError("Only normal HTTPS YouTube and Deezer URLs are supported.")
+        raise RuntimeError("Only normal HTTPS music URLs are supported.")
     host = (parsed.hostname or "").lower().removeprefix("www.")
     if host in {"youtube.com", "m.youtube.com", "music.youtube.com", "youtube-nocookie.com", "youtu.be"}:
         return youtube_url_result(value)
     if host == "deezer.com":
         return deezer_url_result(value)
-    raise RuntimeError("Only YouTube and Deezer URLs are supported.")
+    client_name = musicdl_source.client_name_for_url(value)
+    if client_name:
+        return musicdl_url_result(value, client_name)
+    raise RuntimeError(
+        "That site is not supported. Use a YouTube or Deezer URL, or a URL from one "
+        "of the platforms musicdl supports (NetEase, QQ, Kugou, Kuwo, Migu, Spotify, "
+        "SoundCloud, TIDAL, Qobuz, Apple Music, and more)."
+    )
 
 
 def recent_jobs(limit: int = 12) -> list[sqlite3.Row]:
@@ -732,7 +809,7 @@ def queue_download():
         payload = signer.loads(request.form.get("token", ""), max_age=86400)
     except (BadSignature, SignatureExpired):
         abort(400, "This search result expired. Search again and retry.")
-    if payload.get("source") not in {"youtube", "deezer"}:
+    if payload.get("source") not in {"youtube", "deezer", "musicdl"}:
         abort(400)
     action = request.form.get("action", "add")
     if action not in {"add", "add_request"}:
@@ -1777,6 +1854,25 @@ def expand_deezer(item: dict[str, Any]) -> list[dict[str, Any]]:
     return tracks
 
 
+def expand_musicdl(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn a musicdl result into tracks. Collections are parsed again here because
+    the queued payload only kept the URL."""
+    if item["kind"] == "song":
+        return [dict(item)]
+    song_infos = musicdl_source.parse_url(
+        str(item.get("url") or item.get("id") or ""),
+        str(item.get("client") or ""),
+        str(STATE_DIR / "musicdl-parse"),
+    )
+    tracks = []
+    for song_info in song_infos:
+        try:
+            tracks.append(musicdl_track_entry(song_info))
+        except musicdl_source.MusicdlError:
+            continue
+    return tracks
+
+
 def browse_item(result: dict[str, Any], detail: str = "") -> dict[str, Any]:
     """Reduce a search result to the fields the browse page shows and submits."""
     return {
@@ -2369,6 +2465,19 @@ def download_via_deezer(track: dict[str, Any], temp_dir: Path) -> Path:
     return downloaded
 
 
+def download_via_musicdl(track: dict[str, Any], temp_dir: Path) -> Path:
+    """Fetch the track's audio through musicdl, the fallback between Deezer and YouTube."""
+    if not MUSICDL_ENABLED:
+        raise musicdl_source.MusicdlError("musicdl support is turned off.")
+    stored = track.get("musicdl")
+    if isinstance(stored, dict):
+        return musicdl_source.download_payload(stored, temp_dir)
+    return musicdl_source.search_and_download(
+        str(track.get("artist", "")), str(track.get("title", "")),
+        int(track.get("duration_seconds") or 0), MUSICDL_SOURCES, temp_dir, match_key,
+    )
+
+
 def download_one(track: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
     video_id = str(track.get("video_id") or "")
     source_id = safe_filename(str(track.get("source_id") or video_id), video_id)
@@ -2383,10 +2492,15 @@ def download_one(track: dict[str, Any]) -> tuple[str, Path, dict[str, Any]]:
         temp_dir = Path(temp_name)
         prepared: Path | None = None
         # A signed-in Deezer account is the default source. Anything it cannot
-        # supply falls through to the YouTube path below.
-        if DEEZER is not None:
+        # supply falls through to musicdl and then to the YouTube path below.
+        if track.get("source") != "musicdl" and DEEZER is not None:
             try:
                 prepared = download_via_deezer(track, temp_dir)
+            except Exception:
+                prepared = None
+        if prepared is None and MUSICDL_ENABLED:
+            try:
+                prepared = download_via_musicdl(track, temp_dir)
             except Exception:
                 prepared = None
         if prepared is None:
@@ -2455,7 +2569,12 @@ def process_job(job: sqlite3.Row) -> None:
         tracks, resolution_errors = expand_selection(payload, job_id)
         errors.extend(resolution_errors)
     else:
-        tracks = expand_youtube(payload) if payload["source"] == "youtube" else expand_deezer(payload)
+        if payload["source"] == "youtube":
+            tracks = expand_youtube(payload)
+        elif payload["source"] == "musicdl":
+            tracks = expand_musicdl(payload)
+        else:
+            tracks = expand_deezer(payload)
     if not tracks:
         raise RuntimeError("\n".join(errors) or "This result did not contain any downloadable tracks.")
     update_job(job_id, total=len(tracks), detail=f"Found {len(tracks)} track(s)")
@@ -2533,6 +2652,8 @@ def settings_page():
             "bind_host": request.form.get("bind_host", "").strip() or config.DEFAULT_BIND_HOST,
             "bind_port": request.form.get("bind_port", "").strip() or config.DEFAULT_BIND_PORT,
             "deezer_arl": request.form.get("deezer_arl", "").strip(),
+            "musicdl_enabled": bool(request.form.get("musicdl_enabled")),
+            "musicdl_sources": request.form.get("musicdl_sources", "").strip() or musicdl_source.DEFAULT_SOURCES,
             "diagnostics_enabled": bool(request.form.get("diagnostics_enabled")),
         }
         # Serving plain HTTP on this machine means the session cookie cannot be Secure.

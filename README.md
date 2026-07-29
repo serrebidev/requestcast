@@ -92,6 +92,8 @@ REQUESTCAST_PASSWORD_HASH=...   # scrypt, hex
 REQUESTCAST_ADMIN_PASSWORD_SALT=...
 REQUESTCAST_ADMIN_PASSWORD_HASH=...
 REQUESTCAST_DEEZER_ARL=...      # optional Deezer subscriber ARL
+REQUESTCAST_MUSICDL_ENABLED=1   # optional; musicdl fallback between Deezer and YouTube
+REQUESTCAST_MUSICDL_SOURCES=MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient
 REQUESTCAST_DIAGNOSTICS=1       # optional; collects a support bundle, off by default
 ```
 
@@ -105,9 +107,17 @@ indexing happens inside the upload request, and uploads are accepted up to 64 MB
 
 With a Deezer subscriber ARL configured (the settings page, or `REQUESTCAST_DEEZER_ARL`),
 audio comes from the Deezer account first: FLAC when the account is offered it, then
-320 kbps MP3, then 128 kbps MP3. Tracks the account cannot supply fall back to YouTube,
-fetched with yt-dlp. Without an ARL, YouTube is the only source and Deezer is used for
+320 kbps MP3, then 128 kbps MP3. Tracks the account cannot supply fall back to
+**musicdl** — which searches the configured platforms (NetEase, QQ, Kugou, Kuwo, and
+Migu by default; `REQUESTCAST_MUSICDL_SOURCES` changes the list, and
+`REQUESTCAST_MUSICDL_ENABLED=0` turns the fallback off) — and finally to YouTube,
+fetched with yt-dlp. Without an ARL, YouTube is the last source and Deezer is used for
 **metadata only**, through its public API.
+
+musicdl also widens URL input: pasting a track or playlist URL from any platform it
+supports (NetEase, QQ Music, Kugou, Kuwo, Migu, Qianqian, Spotify, SoundCloud, TIDAL,
+Qobuz, Apple Music, JOOX, JioSaavn, Jamendo, and more) downloads it through musicdl
+directly.
 
 The ARL is runtime configuration. It lives in the settings file or the environment, and
 must never be committed to the repository.

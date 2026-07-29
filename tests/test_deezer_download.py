@@ -100,6 +100,7 @@ def run_download(track, fake, ytdlp_side_effect=None, found_song=None):
     download_dir = root / "downloads"
     patches = [
         patch.object(app, "DEEZER", fake),
+        patch.object(app, "MUSICDL_ENABLED", False),
         patch.object(app, "AZURACAST_ENABLED", False),
         patch.object(app, "STATE_DIR", state_dir),
         patch.object(app, "DOWNLOAD_DIR", download_dir),

@@ -51,6 +51,10 @@ FIELDS: dict[str, Any] = {
     "ffmpeg_path": "",
     "ffprobe_path": "",
     "deezer_arl": "",
+    # musicdl is the fallback source between Deezer and YouTube, and also handles
+    # the other platforms' URLs. Sources are musicdl client names, comma-separated.
+    "musicdl_enabled": True,
+    "musicdl_sources": "MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient",
     # Diagnostics write a large support bundle to disk, so they stay off until asked for.
     "diagnostics_enabled": False,
 }
@@ -77,6 +81,8 @@ ENVIRONMENT_NAMES: dict[str, tuple[str, ...]] = {
     "ffmpeg_path": ("REQUESTCAST_FFMPEG",),
     "ffprobe_path": ("REQUESTCAST_FFPROBE",),
     "deezer_arl": ("REQUESTCAST_DEEZER_ARL", "ADDTO_DEEZER_ARL"),
+    "musicdl_enabled": ("REQUESTCAST_MUSICDL_ENABLED",),
+    "musicdl_sources": ("REQUESTCAST_MUSICDL_SOURCES",),
     "diagnostics_enabled": ("REQUESTCAST_DIAGNOSTICS",),
 }
 

@@ -9,4 +9,5 @@ urllib3==2.7.0
 charset-normalizer==3.4.9
 chardet==5.2.0
 waitress==3.0.2
-ytmusicapi==1.11.1
+ytmusicapi==1.11.5
+musicdl==2.13.4

@@ -162,6 +162,10 @@ def main() -> int:
         "Crypto.Cipher.Blowfish",
         "--collect-all",
         "ytmusicapi",
+        # musicdl registers its platform clients dynamically, so collect the
+        # whole package rather than naming hidden imports one by one.
+        "--collect-all",
+        "musicdl",
         "--exclude-module",
         "tkinter",
         "--exclude-module",

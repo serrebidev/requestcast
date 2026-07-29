@@ -25,6 +25,7 @@ TESTS = (
     "test_job_history.py",
     "test_large_import.py",
     "test_legacy_env.py",
+    "test_musicdl_source.py",
     "test_playlist_import.py",
     "test_preferences.py",
     "test_quality_preservation.py",

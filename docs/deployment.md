@@ -59,6 +59,12 @@ REQUESTCAST_MEDIA_DIR=/var/azuracast/media/Requests
 # Optional. A Deezer subscriber ARL makes Deezer the default audio source
 # (FLAC, then 320 kbps MP3), with YouTube as the fallback. Keep it secret.
 REQUESTCAST_DEEZER_ARL=...
+
+# Optional. musicdl sits between Deezer and YouTube as a download fallback and
+# parses other platforms' URLs. Set to 0 to turn it off; the sources list is
+# comma-separated musicdl client names.
+REQUESTCAST_MUSICDL_ENABLED=1
+REQUESTCAST_MUSICDL_SOURCES=MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient
 ```
 
 Setting `REQUESTCAST_AZURACAST_API_KEY` enables the AzuraCast integration.
