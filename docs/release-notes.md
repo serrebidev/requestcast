@@ -1,23 +1,15 @@
-musicdl joins the download chain, and its platforms' URLs now work.
+Two fixes for the musicdl integration from 1.6.0.
 
-**A second fallback before YouTube.** When Deezer cannot supply a track — or no Deezer
-ARL is configured — RequestCast now asks [musicdl](https://github.com/CharlesPikachu/musicdl)
-before resorting to YouTube: it searches the configured platforms for a clean
-artist/title match and downloads the best result. YouTube via yt-dlp remains the last
-resort, so nothing that worked before is lost. The fallback is on by default; turn it
-off in Settings or with `REQUESTCAST_MUSICDL_ENABLED=0`, and choose which platforms it
-searches with `REQUESTCAST_MUSICDL_SOURCES` (the default is musicdl's own reliable
-five: Migu, NetEase, QQ, Kuwo, and Qianqian).
+**Single-track pages now work on every musicdl platform.** Pasting a bare track URL —
+`soundcloud.com/artist/song`, not just a playlist or set — used to fail with "That URL
+did not produce any tracks musicdl recognizes", because musicdl's URL parser only
+understands collections. RequestCast now reads the page for an artist and title and
+resolves the track by searching that platform's own musicdl client. Tracks whose
+streams cannot be stored up front (HLS streams, short-lived URLs) are re-resolved the
+same way when the download runs instead of being dropped.
 
-**URLs from twenty more platforms.** Paste a track or playlist URL from NetEase,
-QQ Music, Kugou, Kuwo, Migu, Qianqian, Spotify, SoundCloud, TIDAL, Qobuz, Apple Music,
-JOOX, JioSaavn, Jamendo, Soda, StreetVoice, FMA, Suno, MOOV, 5SING, Bodian, or Bilibili
-and RequestCast downloads it through musicdl directly — same tagging, same quality
-checks, same destination as everything else. The same URLs work inside uploaded TXT,
-XLSX, PDF, and playlist files.
-
-**Downloaded files keep the same treatment.** However the audio arrives, it is tagged
-with the track's metadata, verified with ffprobe, and made readable by every account
-on the machine before it lands in the download folder or the AzuraCast library.
-
-Note: musicdl is licensed for non-commercial use; see its repository for the terms.
+**musicdl no longer fails on hardened Linux services.** A service running with a
+read-only home directory (systemd `ProtectSystem=strict`) got
+`[Errno 30] Read-only file system` on any musicdl lookup, because musicdl creates its
+log directory under the account's home. RequestCast now points the XDG directories
+musicdl uses at its own state directory; XDG values you set yourself still win.
