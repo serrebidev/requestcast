@@ -1,4 +1,4 @@
-conclusion=failure
-run_id=30495430125
-run_url=https://github.com/serrebidev/requestcast/actions/runs/30495430125
-source_sha=af69f50ea9240df997f91caaa35875ca3c5b35ad
+conclusion=success
+run_id=30495667702
+run_url=https://github.com/serrebidev/requestcast/actions/runs/30495667702
+source_sha=4a83233c8d7e852a43b6b3786c4e40b327218d93
