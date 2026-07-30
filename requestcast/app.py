@@ -3020,6 +3020,24 @@ TOOL_PATH_SETTINGS = {"yt-dlp": "ytdlp_path", "deno": "deno_path"}
 _tool_install_lock = threading.Lock()
 
 
+def remember_settings(merged: dict[str, Any]) -> None:
+    """Use these settings now, and write them down if the settings file can be written.
+
+    Settings do not always live somewhere writable: a service confined to a handful of
+    paths, a portable copy on read-only media. By the time a tool path is recorded the
+    tool itself is already installed, and ``find_tool`` looks in the tools folder before
+    PATH, so an unwritable settings file costs nothing but the note of where it went. It
+    must never undo the install, fail the download that asked for it, or stop the
+    updater from ever running again.
+    """
+    if config.is_configured(merged):
+        try:
+            config.save(merged)
+        except OSError:
+            pass
+    apply_settings(merged)
+
+
 def ensure_tools_installed(progress: Any = None) -> dict[str, str]:
     """Fetch any missing download tool without waiting to be asked.
 
@@ -3034,10 +3052,7 @@ def ensure_tools_installed(progress: Any = None) -> dict[str, str]:
             return {}
         updates = tools.install_missing(SETTINGS, progress)
         if updates:
-            merged = {**SETTINGS, **updates}
-            if config.is_configured(merged):
-                config.save(merged)
-            apply_settings(merged)
+            remember_settings({**SETTINGS, **updates})
         return updates
 
 
@@ -3050,10 +3065,7 @@ def save_tool_paths(results: list[dict[str, Any]]) -> None:
     }
     if not updates:
         return
-    merged = {**SETTINGS, **updates}
-    if config.is_configured(merged):
-        config.save(merged)
-    apply_settings(merged)
+    remember_settings({**SETTINGS, **updates})
 
 
 def tool_update_loop() -> None:
@@ -3273,10 +3285,7 @@ def setup_tools():
         flash(f"The download tools could not be installed: {exc}")
         return redirect(url_for("setup" if not config.is_configured(SETTINGS) else "preferences"))
     if updates:
-        merged = {**SETTINGS, **updates}
-        if config.is_configured(merged):
-            config.save(merged)
-        apply_settings(merged)
+        remember_settings({**SETTINGS, **updates})
         flash("The download tools are installed.")
     else:
         flash("The download tools were already available.")

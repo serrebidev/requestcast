@@ -352,6 +352,46 @@ try:
     assert client.post("/setup/tools/update", data={}).status_code == 400
     print("preferences_can_update_tools=passed")
 
+    # A settings file that cannot be written must not cost us the update. A service
+    # confined to a few writable paths, or a portable copy on read-only media, still has
+    # to end up using the tool it just installed, and the updater has to survive to run
+    # again — losing the background thread here would leave yt-dlp to rot.
+    before = config.load()["ytdlp_path"]
+    unwritable = str(WORKSPACE / "tools" / "yt-dlp-unwritable")
+    Path(unwritable).write_text("stub", encoding="utf-8")
+    with patch.object(config, "save", side_effect=OSError("Read-only file system")) as refused:
+        appmod.save_tool_paths([
+            {"name": "yt-dlp", "status": "updated", "message": "Updated yt-dlp.", "path": unwritable},
+        ])
+    refused.assert_called_once()
+    assert appmod.YTDLP == unwritable, appmod.YTDLP
+    assert config.load()["ytdlp_path"] == before, "the unwritable save must not have landed"
+
+    with (
+        patch.object(appmod, "WORKER_DISABLED", False),
+        patch.object(tools, "installable_tools", return_value=["deno"]),
+        patch.object(tools, "install_missing", return_value={"deno_path": new_deno}),
+        patch.object(config, "save", side_effect=OSError("Read-only file system")),
+    ):
+        assert appmod.ensure_tools_installed() == {"deno_path": new_deno}
+    assert appmod.DENO == new_deno, appmod.DENO
+
+    # The scheduled round trip runs start to finish with nowhere to write.
+    with (
+        patch.object(config, "save", side_effect=OSError("Read-only file system")),
+        patch.object(
+            tools, "update_all",
+            return_value=[{"name": "yt-dlp", "status": "updated", "message": "Updated yt-dlp.", "path": unwritable}],
+        ),
+    ):
+        results = tools.update_all(config.load())
+        tools.record_update_check(WORKSPACE / "state", results)
+        appmod.save_tool_paths(results)
+    assert tools.last_update_check(WORKSPACE / "state") > 0
+    print("unwritable_settings_do_not_lose_the_update=passed")
+
+    appmod.apply_settings(config.load())
+
     # Automatic updating can be turned off and its interval changed.
     stored = config.load()
     stored.update({"auto_update_tools": False, "auto_update_interval_hours": 6})
