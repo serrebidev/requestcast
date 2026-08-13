@@ -3,6 +3,19 @@
 <h1>Add music</h1>
 <p>Search by name or paste a YouTube, Deezer, or other supported music link. RequestCast keeps the best available audio and adds it to the request library. Artists and YouTube channels can be opened to pick individual releases, albums, or videos.</p>
 
+{% if live %}
+<section aria-labelledby="live-heading">
+  <h2 id="live-heading">Live stream on air</h2>
+  <p>{% if live.artist %}{{ live.artist }} — {% endif %}{{ live.title }}</p>
+  <form method="post" action="{{ url_for('stop_live') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <button type="submit">Stop the live stream</button>
+  </form>
+  <p class="hint">The station switches to the live stream a few seconds after it connects.
+    Stopping it hands the air back to the normal rotation.</p>
+</section>
+{% endif %}
+
 <form method="get" class="search-form" role="search">
   <label for="q">Search or paste a URL</label>
   <input id="q" name="q" type="search" value="{{ query }}" maxlength="2048" required autofocus>

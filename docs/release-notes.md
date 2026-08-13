@@ -1,16 +1,16 @@
-A deployment fix and a Soulseek default change.
+YouTube livestreams now play live instead of trying to download.
 
-**musicdl stops failing to update itself on hardened servers.** On a server
-deployment the Python environment is typically root-owned and made read-only by
-systemd hardening, so the automatic musicdl update tried to write into it every
-cycle and failed with "Read-only file system". RequestCast now recognises a venv
-it cannot write to — and a read-only error from pip itself — and leaves the
-package alone with a clear note, because such an install is updated from
-requirements.txt at deploy time. A genuinely writable install still updates
-itself exactly as before.
+**"Add & request" on a livestream puts it on the air.** A YouTube livestream never
+ends, so there was nothing sensible to download — the old behaviour was a download
+that hung or failed. Now, when live playback is enabled in Preferences, choosing
+"Add & request" on a live URL relays the stream straight into the station's live
+input, and AzuraCast's live-fallback switch takes it on air a few seconds later.
+The home page shows the live stream while it is playing, with a Stop button that
+hands the air back to AutoDJ.
 
-**Soulseek shares the AzuraCast media library by default.** When Soulseek is
-enabled, the folder peers can download from is now the station's AzuraCast media
-folder when one is configured, falling back to the download folder in local mode.
-The radio's music library is shared back to the network out of the box, while
-files RequestCast is still working on stay private.
+**Live playback is opt-in and configurable.** Two new settings control it:
+`azuracast_live_enabled` (off by default) and `azuracast_live_url`, the icecast://
+URL of the station's live/DJ harbor. On a server they can also be set with
+`REQUESTCAST_AZURACAST_LIVE_ENABLED=1` and `REQUESTCAST_AZURACAST_LIVE_URL`. A
+livestream that is added but not requested, or one that appears inside a playlist,
+is reported clearly as a livestream rather than being silently attempted.

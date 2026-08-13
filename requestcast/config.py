@@ -53,6 +53,13 @@ FIELDS: dict[str, Any] = {
     "azuracast_request_playlist_id": "",
     "azuracast_media_dir": "",
     "azuracast_upload_dir": DEFAULT_UPLOAD_DIRECTORY,
+    # YouTube livestreams are endless, so they cannot be downloaded. When this is on,
+    # "Add & request" on a livestream relays it into the station's live harbor so it
+    # goes straight to air instead of trying (and failing) to download it.
+    "azuracast_live_enabled": False,
+    # The destination for a live relay: the full icecast:// URL of the station's
+    # live/DJ harbor, for example icecast://automation:PASSWORD@127.0.0.1:8005/live.
+    "azuracast_live_url": "",
     "password_salt": "",
     "password_hash": "",
     "admin_password_salt": "",
@@ -120,6 +127,8 @@ ENVIRONMENT_NAMES: dict[str, tuple[str, ...]] = {
     "azuracast_request_playlist_id": ("REQUESTCAST_REQUEST_PLAYLIST_ID", "ADDTO_REQUEST_PLAYLIST_ID"),
     "azuracast_media_dir": ("REQUESTCAST_MEDIA_DIR", "ADDTO_MEDIA_DIR"),
     "azuracast_upload_dir": ("REQUESTCAST_UPLOAD_DIR",),
+    "azuracast_live_enabled": ("REQUESTCAST_AZURACAST_LIVE_ENABLED",),
+    "azuracast_live_url": ("REQUESTCAST_AZURACAST_LIVE_URL",),
     "password_salt": ("REQUESTCAST_PASSWORD_SALT", "ADDTO_PASSWORD_SALT"),
     "password_hash": ("REQUESTCAST_PASSWORD_HASH", "ADDTO_PASSWORD_HASH"),
     "admin_password_salt": ("REQUESTCAST_ADMIN_PASSWORD_SALT",),

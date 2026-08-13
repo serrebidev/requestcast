@@ -126,6 +126,8 @@ AZURACAST_API_KEY = ""
 STATION_ID = config.DEFAULT_STATION_ID
 REQUEST_PLAYLIST_ID = ""
 UPLOAD_DIR = config.DEFAULT_UPLOAD_DIRECTORY
+AZURACAST_LIVE_ENABLED = False
+AZURACAST_LIVE_URL = ""
 SECRET_KEY = ""
 PASSWORD_SALT = b""
 PASSWORD_HASH = b""
@@ -162,7 +164,8 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     """Load settings into module state. Safe to call again after the setup page saves."""
     global SETTINGS, STATE_DIR, DOWNLOAD_DIR, MEDIA_DIR, DB_PATH, YTDLP, FFMPEG, FFPROBE, DENO
     global AZURACAST_ENABLED, AZURACAST_API_BASE, AZURACAST_API_KEY, STATION_ID
-    global REQUEST_PLAYLIST_ID, UPLOAD_DIR, SECRET_KEY, PASSWORD_SALT, PASSWORD_HASH
+    global REQUEST_PLAYLIST_ID, UPLOAD_DIR, AZURACAST_LIVE_ENABLED, AZURACAST_LIVE_URL
+    global SECRET_KEY, PASSWORD_SALT, PASSWORD_HASH
     global ADMIN_PASSWORD_SALT, ADMIN_PASSWORD_HASH, signer
     global DEEZER, DEEZER_ERROR
     global MUSICDL_ENABLED, MUSICDL_SOURCES
@@ -190,6 +193,8 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     STATION_ID = str(SETTINGS.get("azuracast_station_id") or config.DEFAULT_STATION_ID)
     REQUEST_PLAYLIST_ID = str(SETTINGS.get("azuracast_request_playlist_id", ""))
     UPLOAD_DIR = str(SETTINGS.get("azuracast_upload_dir") or config.DEFAULT_UPLOAD_DIRECTORY)
+    AZURACAST_LIVE_ENABLED = bool(SETTINGS.get("azuracast_live_enabled"))
+    AZURACAST_LIVE_URL = str(SETTINGS.get("azuracast_live_url", "") or "").strip()
     # Without AzuraCast the downloads folder is the final destination for finished audio.
     MEDIA_DIR = Path(SETTINGS["azuracast_media_dir"]) if (
         AZURACAST_ENABLED and SETTINGS.get("azuracast_media_dir")
@@ -870,11 +875,14 @@ def youtube_url_result(value: str) -> dict[str, Any]:
         ) or "Unknown Artist"
         album = clean_text(str(info.get("album") or ""))
         duration = int(info.get("duration") or 0)
+        live_status = str(info.get("live_status") or "").strip()
+        is_live = live_status == "is_live" or bool(info.get("is_live"))
         payload = {
             "source": "youtube", "kind": "video", "id": resolved_id,
             "video_id": resolved_id, "title": title, "artist": artist,
             "album": album, "duration_seconds": duration,
             "cover": ytdlp_thumbnail(info),
+            "is_live": is_live, "live_status": live_status,
         }
         detail = " — ".join(part for part in (artist, album, format_duration(duration)) if part)
         return {
@@ -1090,7 +1098,7 @@ def index():
     return render_template(
         "index.html", query=query, source=source, kind=kind, results=results,
         errors=errors, jobs=recent_jobs(), url_input=url_input,
-        limit=limit, sources=search_sources(),
+        live=live_now(), limit=limit, sources=search_sources(),
         # A limit set in the settings file or the environment may not be one of the
         # offered sizes, so it joins the list rather than silently reverting.
         limit_choices=sorted(set(SEARCH_LIMIT_CHOICES) | {limit, SEARCH_RESULT_LIMIT}),
@@ -1294,6 +1302,17 @@ def clear_job_history():
         )
     else:
         flash("There was no finished download history to remove.")
+    return redirect(url_for("index"))
+
+
+@app.post("/live/stop")
+def stop_live():
+    """End the current live stream relay and let AutoDJ take back over."""
+    require_csrf()
+    if stop_live_relay():
+        flash("The live stream was stopped. AutoDJ resumes.")
+    else:
+        flash("No live stream is playing.")
     return redirect(url_for("index"))
 
 
@@ -2848,6 +2867,139 @@ def request_refused(message: str) -> bool:
     return any(sign in lowered for sign in REQUEST_REFUSAL_SIGNS)
 
 
+# -- YouTube livestream relay -----------------------------------------------
+#
+# A livestream never ends, so there is nothing to download. When live playback is
+# enabled and a live URL is requested, RequestCast relays the stream into the
+# station's live harbor — the same Liquidsoap "DJ" input the relay scripts feed —
+# and Liquidsoap's live_fallback switch puts it on air about 13 seconds later.
+
+_live_lock = threading.Lock()
+_live_relay: dict[str, Any] = {
+    "procs": [],  # subprocess.Popen handles; yt-dlp first, then ffmpeg
+    "title": "",
+    "artist": "",
+    "video_id": "",
+    "started_at": 0,
+}
+
+
+def live_now() -> dict[str, Any] | None:
+    """The currently-playing live relay, or None when nothing is on air.
+
+    Also clears the record once the relay processes have exited, so a stream that
+    ended (or was stopped by hand) no longer looks like it is playing.
+    """
+    with _live_lock:
+        procs = [proc for proc in _live_relay["procs"] if proc.poll() is None]
+        if not procs:
+            _live_relay["procs"] = []
+            _live_relay["title"] = ""
+            _live_relay["artist"] = ""
+            _live_relay["video_id"] = ""
+            _live_relay["started_at"] = 0
+            return None
+        return {
+            "title": _live_relay["title"],
+            "artist": _live_relay["artist"],
+            "video_id": _live_relay["video_id"],
+            "started_at": _live_relay["started_at"],
+        }
+
+
+def stop_live_relay() -> bool:
+    """End the live relay, returning True when one was actually running."""
+    with _live_lock:
+        procs = _live_relay["procs"]
+        _live_relay["procs"] = []
+        _live_relay["title"] = ""
+        _live_relay["artist"] = ""
+        _live_relay["video_id"] = ""
+        _live_relay["started_at"] = 0
+    stopped = any(proc.poll() is None for proc in procs)
+    for proc in procs:
+        if proc.poll() is None:
+            proc.terminate()
+    for proc in procs:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    return stopped
+
+
+def play_live_stream(track: dict[str, Any]) -> str:
+    """Relay a YouTube livestream into the station's live harbor.
+
+    Returns a short description for the job detail. Only one relay plays at a
+    time: starting a new one stops the previous one first. The two processes —
+    yt-dlp pulling the live audio to stdout, ffmpeg re-encoding it to the harbor —
+    keep running in the background; ``live_now`` and ``stop_live_relay`` track them.
+    """
+    title = clean_text(str(track.get("title", "") or "")) or "Live stream"
+    artist = clean_text(str(track.get("artist", "") or ""))
+    video_id = str(track.get("video_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
+        raise RuntimeError("This live result has no valid YouTube video ID.")
+    if not AZURACAST_LIVE_URL:
+        raise RuntimeError("Live playback is enabled but no live harbor URL is set in Preferences.")
+    if not YTDLP:
+        raise RuntimeError("yt-dlp is not available, so the live stream cannot start.")
+    if not FFMPEG:
+        raise RuntimeError("ffmpeg is not available, so the live stream cannot start.")
+
+    stop_live_relay()
+
+    display = f"{artist} — {title}" if artist else title
+    ytdlp_command = [
+        YTDLP, "--no-plugin-dirs", "--quiet", "--no-warnings", "--no-progress",
+        "--socket-timeout", "30", "--retries", "5", "--fragment-retries", "5",
+        "--retry-sleep", "1", "--no-playlist",
+        "-f", "bestaudio/best", "-o", "-",
+        f"https://www.youtube.com/watch?v={video_id}",
+    ]
+    ffmpeg_command = [
+        FFMPEG, "-nostdin", "-loglevel", "warning",
+        "-thread_queue_size", "2048",
+        "-re", "-i", "pipe:0",
+        "-map", "0:a:0", "-map_metadata", "-1",
+        "-vn", "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "320k",
+        "-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
+        "-metadata", f"title={title}",
+        "-f", "mp3", "-content_type", "audio/mpeg",
+        "-ice_name", display,
+        "-ice_genre", "Live",
+        AZURACAST_LIVE_URL,
+    ]
+    try:
+        ytdlp_proc = subprocess.Popen(
+            ytdlp_command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"yt-dlp could not start the live stream: {exc}") from exc
+    try:
+        ffmpeg_proc = subprocess.Popen(
+            ffmpeg_command, stdin=ytdlp_proc.stdout,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        try:
+            ytdlp_proc.terminate()
+        finally:
+            if ytdlp_proc.stdout:
+                ytdlp_proc.stdout.close()
+        raise RuntimeError(f"ffmpeg could not start the live stream: {exc}") from exc
+    # ffmpeg now owns yt-dlp's stdout; closing our reference keeps the pipe clean.
+    ytdlp_proc.stdout.close()
+    with _live_lock:
+        _live_relay["procs"] = [ytdlp_proc, ffmpeg_proc]
+        _live_relay["title"] = title
+        _live_relay["artist"] = artist
+        _live_relay["video_id"] = video_id
+        _live_relay["started_at"] = int(time.time())
+    return f"Live stream is on air: {display}"
+
+
 def deezer_track_id(track: dict[str, Any]) -> str:
     """The Deezer track ID for this track, looking it up by artist/title if needed."""
     if track.get("source") == "deezer":
@@ -3077,6 +3229,11 @@ def download_one(track: dict[str, Any], attempt: int = 0) -> tuple[str, Path, di
     video_id = str(track.get("video_id") or "")
     source_id = safe_filename(str(track.get("source_id") or video_id), video_id)
     stem = f"{safe_filename(track.get('artist', 'Unknown Artist'))} - {safe_filename(track.get('title', 'Untitled'))} [{track['source']}-{source_id}]"
+    if track.get("is_live"):
+        raise RuntimeError(
+            "This is a YouTube livestream, not a recording, so it cannot be downloaded. "
+            "Choose Add & request to play it live on the radio."
+        )
     existing_media = find_azuracast_media(track)
     if existing_media:
         ensure_request_playlist(existing_media)
@@ -3202,6 +3359,19 @@ def process_job(job: sqlite3.Row) -> None:
     if not tracks:
         raise RuntimeError("\n".join(errors) or "This result did not contain any downloadable tracks.")
     update_job(job_id, total=len(tracks), detail=f"Found {len(tracks)} track(s)")
+    # A single requested livestream plays live instead of being downloaded. Only the
+    # single-track case is relayed automatically, so a playlist that happens to
+    # contain a livestream never hijacks the whole queue.
+    if (
+        payload.get("_request_after_add")
+        and AZURACAST_ENABLED
+        and AZURACAST_LIVE_ENABLED
+        and len(tracks) == 1
+        and tracks[0].get("is_live")
+    ):
+        detail = play_live_stream(tracks[0])
+        update_job(job_id, state="completed", completed=1, total=1, detail=detail)
+        return
     completed, first_request_id, download_errors = run_downloads(tracks, job_id)
     errors.extend(download_errors)
     if completed == 0:
@@ -3395,6 +3565,8 @@ def settings_page():
             "azuracast_request_playlist_id": request.form.get("azuracast_request_playlist_id", "").strip(),
             "azuracast_media_dir": request.form.get("azuracast_media_dir", "").strip(),
             "azuracast_upload_dir": request.form.get("azuracast_upload_dir", "").strip() or config.DEFAULT_UPLOAD_DIRECTORY,
+            "azuracast_live_enabled": bool(request.form.get("azuracast_live_enabled")),
+            "azuracast_live_url": request.form.get("azuracast_live_url", "").strip(),
             "bind_host": request.form.get("bind_host", "").strip() or config.DEFAULT_BIND_HOST,
             "bind_port": request.form.get("bind_port", "").strip() or config.DEFAULT_BIND_PORT,
             "deezer_arl": request.form.get("deezer_arl", "").strip(),

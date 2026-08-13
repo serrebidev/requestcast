@@ -72,6 +72,21 @@
   <input id="azuracast_media_dir" name="azuracast_media_dir" type="text"
          value="{{ settings.azuracast_media_dir }}" autocomplete="off" spellcheck="false">
 
+  <h3>Live streams</h3>
+  <p>YouTube livestreams never end, so there is nothing to download. Turn this on and
+    "Add &amp; request" on a livestream relays it straight to air instead.</p>
+  <label for="azuracast_live_enabled">
+    <input id="azuracast_live_enabled" name="azuracast_live_enabled" type="checkbox" value="1"
+           {% if settings.azuracast_live_enabled %}checked{% endif %}>
+    Play livestreams live when they are requested
+  </label>
+  <label for="azuracast_live_url">Live harbor (icecast://) URL</label>
+  <input id="azuracast_live_url" name="azuracast_live_url" type="text"
+         value="{{ settings.azuracast_live_url }}" autocomplete="off" spellcheck="false">
+  <p class="hint">The station's live/DJ input, for example
+    icecast://automation:PASSWORD@127.0.0.1:8005/live. AzuraCast shows the source
+    password under Station profile, Broadcasting.</p>
+
   <h2>Deezer</h2>
   <label for="deezer_arl">Deezer ARL cookie (optional)</label>
   <input id="deezer_arl" name="deezer_arl" type="password"

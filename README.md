@@ -39,6 +39,9 @@ It runs two ways from the same code: a **portable Windows program** you double-c
   verify the audio packets come out bit-identical
 - Writes proper tags and cover art for MP3, MP4/M4A, FLAC, Ogg, and WAV/AIFF
 - Optionally uploads each finished file to AzuraCast and adds it to a request playlist
+- YouTube **livestreams play live** instead of downloading: "Add & request" on a live URL
+  relays it straight into the station's live input so it goes on air (and a Stop button
+  hands the air back to AutoDJ)
 - **Installs and updates its own tools.** yt-dlp, ffmpeg, and Deno are fetched in the
   background on first run, and yt-dlp, Deno, and musicdl are kept up to date after that
 
@@ -107,6 +110,8 @@ REQUESTCAST_AZURACAST_API_BASE=http://127.0.0.1:12000/api
 REQUESTCAST_AZURACAST_API_KEY=...
 REQUESTCAST_STATION_ID=1
 REQUESTCAST_REQUEST_PLAYLIST_ID=10
+REQUESTCAST_AZURACAST_LIVE_ENABLED=1  # optional; play YouTube livestreams live on request
+REQUESTCAST_AZURACAST_LIVE_URL=icecast://automation:PASSWORD@127.0.0.1:8005/live
 REQUESTCAST_SECRET_KEY=...
 REQUESTCAST_PASSWORD_SALT=...   # 32 bytes, hex
 REQUESTCAST_PASSWORD_HASH=...   # scrypt, hex
