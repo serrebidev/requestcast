@@ -1,16 +1,16 @@
-Livestreams now hand the air back to AutoDJ by themselves when they end, and
-ffprobe is tracked as a required tool.
+RequestCast now recognises live events that it did not start — a scheduled show
+like A State of Trance, a remote DJ, or another tool feeding the live harbor —
+and yields to them.
 
-**Auto-return to AutoDJ.** When a relayed livestream ends, yt-dlp exits but the
-ffmpeg encoder can linger on the harbor feeding silence, which keeps the station
-stuck on a dead live source. A watchdog now waits on the source process and, the
-moment it ends, stops the encoder, clears the on-air record, and pushes
-`is_live="false"` to Liquidsoap — so AutoDJ resumes automatically and the
-now-playing display stops claiming a live stream. The watcher is keyed on the
-actual process handles, so re-requesting the same stream can never let a stale
-watcher tear down the new relay.
+**Outside events are detected and shown.** The home page now reports the live
+event currently on air (from the station's nowplaying API) alongside RequestCast's
+own relay. RequestCast's own relay is told apart by matching its broadcast start
+time, so it never shows up twice.
 
-**ffprobe is a required tool.** The missing-tools check (setup page, diagnostics,
-and automatic install) now includes ffprobe alongside ffmpeg, so a station with
-ffmpeg but no ffprobe is reported clearly and, on Windows, both are installed
-together.
+**Live events take priority.** When a live event is already on air, "Add &
+request" on a YouTube livestream now reports that the event has priority instead
+of connecting a second source over it. While a relayed stream is playing, the
+title/metadata loop stops the moment an outside event takes over, so RequestCast
+never overwrites the event's own title; and when a relay ends, the watchdog only
+marks the live over if no outside event has taken over the harbor — so an
+incoming show is not wrongly reported as ended.

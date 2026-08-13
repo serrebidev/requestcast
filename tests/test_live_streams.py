@@ -279,3 +279,82 @@ with (
     except app.LiveStreamError:
         pass
 print("unrelayed_livestream_fails_fast=passed")
+
+
+# An outside live event (a scheduled show, a remote DJ) is detected via the
+# station's nowplaying API and reported, while our own relay is excluded.
+app._live_relay["started_at"] = 0  # no RequestCast relay running
+with patch.object(app, "_nowplaying", return_value={
+    "live": {"is_live": True, "streamer_name": "Automation DJ", "broadcast_start": 1700000000},
+    "now_playing": {"song": {"title": "A State of Trance Live", "artist": ""}},
+}):
+    event = app.station_live_event()
+assert event is not None
+assert event["title"] == "A State of Trance Live"
+assert event["streamer_name"] == "Automation DJ"
+assert event["started_at"] == 1700000000
+print("external_live_event_detected=passed")
+
+now_ts = int(app.time.time())
+app._live_relay["started_at"] = now_ts  # our relay connected moments ago
+with patch.object(app, "_nowplaying", return_value={
+    "live": {"is_live": True, "streamer_name": "Automation DJ", "broadcast_start": now_ts + 2},
+    "now_playing": {"song": {"title": "Our Relay", "artist": ""}},
+}):
+    assert app.station_live_event() is None
+app._live_relay["started_at"] = 0
+# Without AzuraCast configured the detector stays quiet and never hits the network.
+with (
+    patch.object(app, "AZURACAST_ENABLED", False),
+    patch.object(app.requests, "get") as never_get,
+):
+    assert app.station_live_event() is None
+never_get.assert_not_called()
+print("own_relay_not_external=passed")
+
+
+# When an outside event is already on air, the requested stream yields to it.
+with (
+    patch.object(app, "AZURACAST_LIVE_URL", "icecast://automation:pass@127.0.0.1:8005/live"),
+    patch.object(app, "YTDLP", "yt-dlp"),
+    patch.object(app, "FFMPEG", "ffmpeg"),
+    patch.object(app, "station_live_event", return_value={
+        "title": "A State of Trance Live", "streamer_name": "Automation DJ",
+    }),
+    patch.object(app.subprocess, "Popen") as never_spawned,
+):
+    detail = app.play_live_stream({"video_id": "BkoZnfez9Y0", "title": "Mine", "artist": ""})
+assert "already on air" in detail and "A State of Trance Live" in detail
+never_spawned.assert_not_called()
+print("external_event_has_priority=passed")
+
+
+# If an outside event took over while the relay ran, the watchdog does not mark
+# the live over (it would wrongly kill the event's on-air status).
+source_proc = FakeProc(exit_after_wait=True)
+encoder_proc = FakeProc()
+app._live_relay["procs"] = [source_proc, encoder_proc]
+app._live_relay["started_at"] = int(app.time.time()) - 3600  # ours started an hour ago
+with (
+    patch.object(app, "_harbor_live", return_value={
+        "is_live": True, "broadcast_start": int(app.time.time()),  # someone else now
+    }),
+    patch.object(app, "_push_live_ended") as never_ended,
+):
+    app._live_watchdog(source_proc, encoder_proc)
+assert encoder_proc.terminated
+never_ended.assert_not_called()
+assert app.live_now() is None
+print("watchdog_yields_to_external_event=passed")
+
+
+# The metadata loop stops stamping our title the moment an outside event takes over.
+with (
+    patch.object(app.time, "sleep"),
+    patch.object(app, "live_now", return_value={"video_id": "BkoZnfez9Y0", "title": "Mine"}),
+    patch.object(app, "station_live_event", return_value={"title": "A State of Trance Live"}),
+    patch.object(app, "_push_live_metadata") as pushed,
+):
+    app._metadata_loop("Mine", "", "BkoZnfez9Y0")
+pushed.assert_not_called()
+print("metadata_loop_yields_to_external_event=passed")

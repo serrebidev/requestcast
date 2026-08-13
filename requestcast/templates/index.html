@@ -16,6 +16,18 @@
 </section>
 {% endif %}
 
+{% if external_live %}
+<section aria-labelledby="external-live-heading">
+  <h2 id="external-live-heading">Live event on air</h2>
+  <p>
+    {% if external_live.title %}{% if external_live.artist %}{{ external_live.artist }} — {% endif %}{{ external_live.title }}
+    {% elif external_live.streamer_name %}{{ external_live.streamer_name }}
+    {% else %}A live show{% endif %}
+  </p>
+  <p class="hint">This live event is played by the station and takes priority over requested streams until it ends.</p>
+</section>
+{% endif %}
+
 <form method="get" class="search-form" role="search">
   <label for="q">Search or paste a URL</label>
   <input id="q" name="q" type="search" value="{{ query }}" maxlength="2048" required autofocus>

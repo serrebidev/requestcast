@@ -1103,7 +1103,7 @@ def index():
     return render_template(
         "index.html", query=query, source=source, kind=kind, results=results,
         errors=errors, jobs=recent_jobs(), url_input=url_input,
-        live=live_now(), limit=limit, sources=search_sources(),
+        live=live_now(), external_live=station_live_event(), limit=limit, sources=search_sources(),
         # A limit set in the settings file or the environment may not be one of the
         # offered sizes, so it joins the list rather than silently reverting.
         limit_choices=sorted(set(SEARCH_LIMIT_CHOICES) | {limit, SEARCH_RESULT_LIMIT}),
@@ -2941,6 +2941,88 @@ def stop_live_relay() -> bool:
     return stopped
 
 
+_live_event_lock = threading.Lock()
+_live_event_cache: dict[str, Any] = {"at": 0.0, "raw": None}
+
+
+def _nowplaying(fresh: bool = False) -> dict[str, Any] | None:
+    """The station's nowplaying API payload, cached for a few seconds.
+
+    AzuraCast reports what Liquidsoap has on air right now, including live
+    sources that something other than RequestCast started (a scheduled show, a
+    remote DJ, another tool). Returns None when the station is not configured
+    or the API cannot be reached, so callers treat the event as unknown rather
+    than absent.
+    """
+    if not (AZURACAST_ENABLED and AZURACAST_API_KEY):
+        return None
+    now = time.monotonic()
+    with _live_event_lock:
+        if not fresh and _live_event_cache["raw"] is not None and now - _live_event_cache["at"] < 10.0:
+            return _live_event_cache["raw"]
+    try:
+        response = requests.get(
+            station_api("/nowplaying"), headers=azuracast_headers(), timeout=HTTP_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    with _live_event_lock:
+        _live_event_cache["raw"] = data
+        _live_event_cache["at"] = time.monotonic()
+    return data
+
+
+def _harbor_live(fresh: bool = False) -> dict[str, Any] | None:
+    """The live harbor's current state, distilled from the nowplaying payload."""
+    raw = _nowplaying(fresh=fresh)
+    if not raw:
+        return None
+    live = raw.get("live") or {}
+    if not live.get("is_live"):
+        return {"is_live": False, "broadcast_start": 0}
+    song = (raw.get("now_playing") or {}).get("song") or {}
+    return {
+        "is_live": True,
+        "broadcast_start": int(live.get("broadcast_start") or 0),
+        "title": clean_text(str(song.get("title") or "")),
+        "artist": clean_text(str(song.get("artist") or "")),
+        "streamer_name": clean_text(str(live.get("streamer_name") or "")),
+    }
+
+
+def _broadcast_is_ours(started_at: int, broadcast_start: int) -> bool:
+    """Whether a live broadcast start time belongs to the relay we just started."""
+    return bool(started_at and broadcast_start and abs(started_at - broadcast_start) <= 90)
+
+
+def station_live_event() -> dict[str, Any] | None:
+    """The live event on air that RequestCast did not start, or None.
+
+    RequestCast's own relay is excluded by matching the broadcast start time
+    against the relay's start time, so this reports only outside events — a
+    scheduled show like A State of Trance, a remote DJ, or another tool. The
+    home page uses it to show the event, and the relay yields to it rather
+    than stomping a show that is already on air.
+    """
+    live = _harbor_live()
+    if not live or not live.get("is_live"):
+        return None
+    with _live_lock:
+        ours = _live_relay["started_at"]
+    if _broadcast_is_ours(ours, live["broadcast_start"]):
+        return None
+    return {
+        "title": live["title"],
+        "artist": live["artist"],
+        "streamer_name": live["streamer_name"],
+        "started_at": live["broadcast_start"],
+    }
+
+
 def _push_live_metadata(title: str, artist: str) -> None:
     """Send the now-playing title for the live source to Liquidsoap.
 
@@ -3013,6 +3095,7 @@ def _live_watchdog(source_proc: subprocess.Popen, encoder_proc: subprocess.Popen
     with _live_lock:
         if _live_relay["procs"] != [source_proc, encoder_proc]:
             return  # stopped by hand or replaced by a newer relay
+        our_started_at = _live_relay["started_at"]
         _live_relay["procs"] = []
         _live_relay["title"] = ""
         _live_relay["artist"] = ""
@@ -3024,6 +3107,12 @@ def _live_watchdog(source_proc: subprocess.Popen, encoder_proc: subprocess.Popen
                 proc.terminate()
             except OSError:
                 pass
+    # If an outside live event has taken over the harbor in the meantime, do not
+    # claim the live is over: the event is still on air and Liquidsoap is already
+    # playing it, so pushing is_live=false would wrongly mark it dead.
+    live = _harbor_live(fresh=True)
+    if live and live.get("is_live") and not _broadcast_is_ours(our_started_at, live["broadcast_start"]):
+        return
     _push_live_ended()
 
 
@@ -3040,6 +3129,10 @@ def _metadata_loop(title: str, artist: str, video_id: str) -> None:
     while True:
         current = live_now()
         if not current or current.get("video_id") != video_id:
+            return
+        if station_live_event():
+            # An outside live event has taken over the harbor; stop overwriting
+            # its title with ours and let the relay's watchdog finish the rest.
             return
         _push_live_metadata(title, artist)
         time.sleep(30)
@@ -3064,6 +3157,14 @@ def play_live_stream(track: dict[str, Any]) -> str:
         raise RuntimeError("yt-dlp is not available, so the live stream cannot start.")
     if not FFMPEG:
         raise RuntimeError("ffmpeg is not available, so the live stream cannot start.")
+
+    external = station_live_event()
+    if external:
+        name = external.get("title") or external.get("streamer_name") or "another live event"
+        return (
+            f"A live event is already on air ({name}); live events take priority, "
+            "so this stream was not started."
+        )
 
     stop_live_relay()
 

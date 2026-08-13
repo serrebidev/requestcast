@@ -42,6 +42,9 @@ It runs two ways from the same code: a **portable Windows program** you double-c
 - YouTube **livestreams play live** instead of downloading: "Add & request" on a live URL
   relays it straight into the station's live input so it goes on air (and a Stop button
   hands the air back to AutoDJ)
+- **Yields to outside live events.** A scheduled show, remote DJ, or other live source
+  already on air takes priority: RequestCast shows it on the home page and never stomps
+  it with a requested stream, its own title, or an "ended" signal
 - **Installs and updates its own tools.** yt-dlp, ffmpeg, and Deno are fetched in the
   background on first run, and yt-dlp, Deno, and musicdl are kept up to date after that
 
