@@ -33,6 +33,7 @@ TESTS = (
     "test_request_flow.py",
     "test_search_limits.py",
     "test_server_http.py",
+    "test_soulseek.py",
     "test_tool_updates.py",
     "test_upload_route.py",
     "test_url_input.py",

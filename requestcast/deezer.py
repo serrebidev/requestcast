@@ -30,13 +30,59 @@ BLOWFISH_SECRET = b"g4el58wc0zvf9na1"
 BLOWFISH_IV = b"\x00\x01\x02\x03\x04\x05\x06\x07"
 # The CDN encrypts every third 2048-byte chunk.
 CHUNK_SIZE = 2048
-QUALITY_FORMATS = ("FLAC", "MP3_320", "MP3_128")
+# Preference order per the Deezer quality setting. "flac" asks for lossless first
+# and drops no further than 320 kbps; "mp3_320" asks for 320 kbps directly, and
+# neither silently falls back to 128 kbps -- the caller falls back to another
+# source instead.
+QUALITY_FORMATS = {
+    "flac": ("FLAC", "MP3_320"),
+    "mp3_320": ("MP3_320",),
+}
+DEFAULT_QUALITY = "flac"
 QUALITY_EXTENSIONS = {"FLAC": ".flac", "MP3_320": ".mp3", "MP3_128": ".mp3"}
 HTTP_TIMEOUT = (10, 60)
+COVER_URL = "https://e-cdns-images.dzcdn.net/images/cover/{md5}/1000x1000-000000-100-0-0.jpg"
 
 
 class DeezerError(RuntimeError):
     """The Deezer session or download failed; the caller falls back to YouTube."""
+
+
+def quality_formats(preference: str) -> tuple[str, ...]:
+    """The Deezer qualities to ask for, in order, for this preference."""
+    return QUALITY_FORMATS.get(str(preference or "").strip().lower(), QUALITY_FORMATS[DEFAULT_QUALITY])
+
+
+def fetch_lrclib_lyrics(
+    artist: str, title: str, album: str = "", duration_s: int = 0,
+) -> str:
+    """Synced LRC text from LRCLIB, or an empty string when there is none.
+
+    Lyrics are optional enrichment: any failure just means the track is saved
+    without them.
+    """
+    artist = (artist or "").strip()
+    title = (title or "").strip()
+    if not title:
+        return ""
+    try:
+        response = requests.get(
+            "https://lrclib.net/api/get",
+            params={
+                "track_name": title,
+                "artist_name": artist,
+                "album_name": album or "",
+                "duration": int(duration_s or 0),
+            },
+            headers={"User-Agent": f"RequestCast ({USER_AGENT})"},
+            timeout=HTTP_TIMEOUT,
+        )
+        if response.status_code != 200:
+            return ""
+        data = response.json()
+        return str(data.get("syncedLyrics") or data.get("plainLyrics") or "")
+    except (requests.RequestException, ValueError):
+        return ""
 
 
 def _read_exact(stream: BinaryIO, size: int) -> bytes:
@@ -111,11 +157,11 @@ class DeezerClient:
             raise DeezerError(f"Deezer gave no download token for track {track_id}.")
         return token, fallback
 
-    def _stream_url(self, track_token: str) -> tuple[str, str]:
+    def _stream_url(self, track_token: str, qualities: tuple[str, ...]) -> tuple[str, str]:
         """The first (URL, format) the account is allowed, best quality first."""
         if not self._license_token:
             raise DeezerError("The Deezer session has no licence token.")
-        for quality in QUALITY_FORMATS:
+        for quality in qualities:
             body = {
                 "license_token": self._license_token,
                 "media": [{"type": "FULL", "formats": [{"cipher": "BF_CBC_STRIPE", "format": quality}]}],
@@ -158,17 +204,55 @@ class DeezerClient:
         response.raw.decode_content = True
         return response
 
-    def _fetch(self, track_id: str, destination_dir: Path, depth: int = 0) -> tuple[Path, str]:
+    def track_metadata(self, track_id: str) -> dict[str, Any]:
+        """Authoritative track metadata straight from Deezer's gateway.
+
+        The public API only returns what a search can see; ``deezer.pageTrack``
+        returns the fields the web player uses, including cover art, ISRC, the
+        release date, and the track/disc positions.
+        """
+        data = self._gateway("deezer.pageTrack", {"sng_id": str(track_id)})
+        results = data.get("results") or {}
+        meta = results.get("DATA") or {}
+        if not meta:
+            raise DeezerError(f"Deezer gave no metadata for track {track_id}.")
+        picture = str(meta.get("ALB_PICTURE") or "")
+        try:
+            duration = int(meta.get("DURATION") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        try:
+            track_number = int(meta.get("TRACK_NUMBER") or 0)
+        except (TypeError, ValueError):
+            track_number = 0
+        try:
+            disc_number = int(meta.get("DISK_NUMBER") or 0)
+        except (TypeError, ValueError):
+            disc_number = 0
+        return {
+            "title": str(meta.get("SNG_TITLE") or ""),
+            "artist": str(meta.get("ART_NAME") or ""),
+            "album": str(meta.get("ALB_TITLE") or ""),
+            "isrc": str(meta.get("ISRC") or ""),
+            "year": str(meta.get("PHYSICAL_RELEASE_DATE") or "")[:4],
+            "track_number": track_number,
+            "disc_number": disc_number,
+            "duration_seconds": duration,
+            "cover": COVER_URL.format(md5=picture) if picture else "",
+        }
+
+    def _fetch(self, track_id: str, destination_dir: Path, depth: int = 0, qualities: tuple[str, ...] | None = None) -> tuple[Path, str]:
+        qualities = qualities or quality_formats(DEFAULT_QUALITY)
         token, fallback_id = self._track_token(track_id)
         if not token:
             if fallback_id and fallback_id != str(track_id) and depth < 1:
-                return self._fetch(fallback_id, destination_dir, depth + 1)
+                return self._fetch(fallback_id, destination_dir, depth + 1, qualities)
             raise DeezerError(f"Deezer gave no download token for track {track_id}.")
         try:
-            url, quality = self._stream_url(token)
+            url, quality = self._stream_url(token, qualities)
         except DeezerError:
             if fallback_id and fallback_id != str(track_id) and depth < 1:
-                return self._fetch(fallback_id, destination_dir, depth + 1)
+                return self._fetch(fallback_id, destination_dir, depth + 1, qualities)
             raise
         target = destination_dir / f"deezer-{track_id}{QUALITY_EXTENSIONS.get(quality, '.mp3')}"
         partial = target.with_suffix(target.suffix + ".part")
@@ -185,13 +269,14 @@ class DeezerClient:
         partial.replace(target)
         return target, quality
 
-    def download(self, track_id: str, destination_dir: Path) -> tuple[Path, str]:
+    def download(self, track_id: str, destination_dir: Path, quality: str = DEFAULT_QUALITY) -> tuple[Path, str]:
         """Download the best available quality; returns ``(file, format)``.
 
         Gateway and licence tokens expire, so one re-login and retry is allowed.
         """
+        qualities = quality_formats(quality)
         try:
-            return self._fetch(str(track_id), destination_dir)
+            return self._fetch(str(track_id), destination_dir, qualities=qualities)
         except DeezerError:
             self.login()
-            return self._fetch(str(track_id), destination_dir)
+            return self._fetch(str(track_id), destination_dir, qualities=qualities)

@@ -166,6 +166,13 @@ def main() -> int:
         # whole package rather than naming hidden imports one by one.
         "--collect-all",
         "musicdl",
+        # aioslsk is optional but bundled so the Soulseek source works out of
+        # the box; it registers message types dynamically, so collect it and
+        # its UPnP helper wholesale.
+        "--collect-all",
+        "aioslsk",
+        "--collect-all",
+        "async_upnp_client",
         "--exclude-module",
         "tkinter",
         "--exclude-module",

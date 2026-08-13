@@ -69,7 +69,7 @@ class FakeDeezer:
     def __init__(self):
         self.calls = []
 
-    def download(self, track_id, destination_dir):
+    def download(self, track_id, destination_dir, quality=None):
         self.calls.append(track_id)
         raise deezer.DeezerError("stream refused")
 
@@ -188,7 +188,7 @@ print("musicdl_disabled_goes_to_youtube=passed")
 
 # A musicdl URL result downloads through its stored payload, never through Deezer.
 class DeezerMustNotRun:
-    def download(self, track_id, destination_dir):
+    def download(self, track_id, destination_dir, quality=None):
         raise AssertionError("Deezer must not handle a musicdl track")
 
 

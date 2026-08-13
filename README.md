@@ -8,9 +8,9 @@ It runs two ways from the same code: a **portable Windows program** you double-c
 
 ## What it does
 
-- Search YouTube, Deezer, and optionally every musicdl platform from one box, or paste a URL
-  to a track, album, playlist, or artist. How many results each source returns is a setting,
-  and every search can ask for a different number
+- Search YouTube, Deezer, optionally every musicdl platform, and Soulseek peers from one box,
+  or paste a URL to a track, album, playlist, or artist. How many results each source returns
+  is a setting, and every search can ask for a different number
 - **Retries you can tune.** Bulk imports get refused in batches by YouTube — 403 and
   "video unavailable" on tracks that download fine later. Extra attempts per track, a gap
   between tracks, a cooldown after repeated refusals, a final pass over what failed, and a
@@ -25,9 +25,14 @@ It runs two ways from the same code: a **portable Windows program** you double-c
   fixing afterwards
 - **Clear the download history** whenever you like; the music files are left alone
 - With a **Deezer subscriber ARL** configured, downloads come from Deezer first — **FLAC**, or
-  **320 kbps MP3** when FLAC is not offered — and YouTube is only the fallback
+  **320 kbps MP3** when the account does not offer FLAC (which quality you prefer is a setting)
+  — and YouTube is only the fallback
 - Prefers **Deezer's copy of a track's metadata** when one matches cleanly, so artist, title,
   album, year, and ISRC come out right instead of guessed from a video title
+- Optional **Soulseek** source for tracks the other sources do not carry: search peers, pick
+  the best result, and optionally share the download folder back so the network stays alive
+- Fetches **synced lyrics** from LRCLIB for Deezer downloads and tags them alongside the cover
+  art
 - Artist-only lines take that artist's **entire catalogue** by default, or a cap you choose
 - **Preserves audio quality** — the source stream is remuxed, never re-encoded, and the tests
   verify the audio packets come out bit-identical
@@ -107,8 +112,15 @@ REQUESTCAST_PASSWORD_HASH=...   # scrypt, hex
 REQUESTCAST_ADMIN_PASSWORD_SALT=...
 REQUESTCAST_ADMIN_PASSWORD_HASH=...
 REQUESTCAST_DEEZER_ARL=...      # optional Deezer subscriber ARL
+REQUESTCAST_DEEZER_QUALITY=flac # flac (lossless, falls back to 320 kbps) or mp3_320
+REQUESTCAST_YOUTUBE_AUDIO_FORMAT=original  # original, opus, mp3, or flac
 REQUESTCAST_MUSICDL_ENABLED=1   # optional; musicdl fallback between Deezer and YouTube
 REQUESTCAST_MUSICDL_SOURCES=MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient
+REQUESTCAST_SOULSEEK_ENABLED=1      # optional; peer-to-peer source (needs aioslsk)
+REQUESTCAST_SOULSEEK_USERNAME=...
+REQUESTCAST_SOULSEEK_PASSWORD=...
+REQUESTCAST_SOULSEEK_MAX_RESULTS=500  # 10 to 2000
+REQUESTCAST_SOULSEEK_SHARE_DOWNLOADS=1
 REQUESTCAST_DIAGNOSTICS=1       # optional; collects a support bundle, off by default
 
 REQUESTCAST_SEARCH_LIMIT=50     # results per source and per result type, 5 to 200
@@ -134,13 +146,21 @@ indexing happens inside the upload request, and uploads are accepted up to 64 MB
 ## Where the audio comes from
 
 With a Deezer subscriber ARL configured (the settings page, or `REQUESTCAST_DEEZER_ARL`),
-audio comes from the Deezer account first: FLAC when the account is offered it, then
-320 kbps MP3, then 128 kbps MP3. Tracks the account cannot supply fall back to
-**musicdl** — which searches the configured platforms (NetEase, QQ, Kugou, Kuwo, and
-Migu by default; `REQUESTCAST_MUSICDL_SOURCES` changes the list, and
-`REQUESTCAST_MUSICDL_ENABLED=0` turns the fallback off) — and finally to YouTube,
-fetched with yt-dlp. Without an ARL, YouTube is the last source and Deezer is used for
-**metadata only**, through its public API.
+audio comes from the Deezer account first: FLAC when the account is offered it, or 320 kbps
+MP3 directly, depending on `REQUESTCAST_DEEZER_QUALITY` (`flac` by default; `mp3_320`
+skips FLAC). Tracks the account cannot supply fall back to **musicdl** — which searches the
+configured platforms (NetEase, QQ, Kugou, Kuwo, and Migu by default;
+`REQUESTCAST_MUSICDL_SOURCES` changes the list, and `REQUESTCAST_MUSICDL_ENABLED=0` turns
+the fallback off) — and finally to YouTube, fetched with yt-dlp. `REQUESTCAST_YOUTUBE_AUDIO_FORMAT`
+controls what YouTube audio is delivered as: `original` keeps the source codec untouched (the
+default and the quality-preserving choice), while `opus`, `mp3`, and `flac` convert it with one
+ffmpeg pass. Without an ARL, YouTube is the last source and Deezer is used for **metadata
+only**, through its public API.
+
+With `REQUESTCAST_SOULSEEK_ENABLED=1` and a username and password, a separate **Soulseek**
+search appears and can download files straight from peers. Soulseek results have no catalog
+fallback, so a peer that goes offline fails that one track rather than silently substituting
+another source. Set `REQUESTCAST_SOULSEEK_SHARE_DOWNLOADS=0` to download without sharing back.
 
 musicdl also widens URL input: pasting a track or playlist URL from any platform it
 supports (NetEase, QQ Music, Kugou, Kuwo, Migu, Qianqian, Spotify, SoundCloud, TIDAL,

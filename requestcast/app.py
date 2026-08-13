@@ -29,7 +29,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from mutagen import File as MutagenFile
 from mutagen.aiff import AIFF
 from mutagen.flac import FLAC, Picture
-from mutagen.id3 import APIC, COMM, ID3, TALB, TDRC, TIT2, TPE1, TPOS, TRCK, TXXX
+from mutagen.id3 import APIC, COMM, ID3, TALB, TDRC, TIT2, TPE1, TPOS, TRCK, TXXX, USLT
 from mutagen.mp4 import MP4, MP4Cover
 from mutagen.wave import WAVE
 from openpyxl import load_workbook
@@ -37,7 +37,7 @@ from pypdf import PdfReader
 from werkzeug.middleware.proxy_fix import ProxyFix
 from ytmusicapi import YTMusic
 
-from . import config, deezer, musicdl_source, permissions, tools
+from . import config, deezer, musicdl_source, permissions, soulseek, tools
 
 
 HTTP_TIMEOUT = (10, 30)
@@ -135,6 +135,13 @@ DEEZER: deezer.DeezerClient | None = None
 DEEZER_ERROR = ""
 MUSICDL_ENABLED = False
 MUSICDL_SOURCES: list[str] = []
+DEEZER_QUALITY = deezer.DEFAULT_QUALITY
+YOUTUBE_AUDIO_FORMAT = "original"
+SOULSEEK_ENABLED = False
+SOULSEEK_USERNAME = ""
+SOULSEEK_PASSWORD = ""
+SOULSEEK_MAX_RESULTS = 500
+SOULSEEK_SHARE_DOWNLOADS = True
 SEARCH_RESULT_LIMIT = 50
 SEARCH_MUSICDL = False
 DOWNLOAD_RETRIES = 2
@@ -159,6 +166,9 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     global ADMIN_PASSWORD_SALT, ADMIN_PASSWORD_HASH, signer
     global DEEZER, DEEZER_ERROR
     global MUSICDL_ENABLED, MUSICDL_SOURCES
+    global DEEZER_QUALITY, YOUTUBE_AUDIO_FORMAT
+    global SOULSEEK_ENABLED, SOULSEEK_USERNAME, SOULSEEK_PASSWORD
+    global SOULSEEK_MAX_RESULTS, SOULSEEK_SHARE_DOWNLOADS
     global SEARCH_RESULT_LIMIT, SEARCH_MUSICDL
     global DOWNLOAD_RETRIES, DOWNLOAD_RETRY_DELAY, DOWNLOAD_GAP_SECONDS, RATE_LIMIT_COOLDOWN
     global JOB_RETRY_LIMIT, AUTO_UPDATE_TOOLS, AUTO_UPDATE_INTERVAL_HOURS
@@ -215,6 +225,19 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
         for name in str(SETTINGS.get("musicdl_sources", "")).split(",")
         if name.strip()
     ]
+
+    # Deezer quality, YouTube output format, and the optional Soulseek source.
+    DEEZER_QUALITY = str(
+        SETTINGS.get("deezer_quality", deezer.DEFAULT_QUALITY)
+    ).strip().lower() or deezer.DEFAULT_QUALITY
+    YOUTUBE_AUDIO_FORMAT = str(
+        SETTINGS.get("youtube_audio_format", "original")
+    ).strip().lower() or "original"
+    SOULSEEK_ENABLED = bool(SETTINGS.get("soulseek_enabled"))
+    SOULSEEK_USERNAME = str(SETTINGS.get("soulseek_username", "") or "").strip()
+    SOULSEEK_PASSWORD = str(SETTINGS.get("soulseek_password", "") or "")
+    SOULSEEK_MAX_RESULTS = config.clamp("soulseek_max_results", SETTINGS.get("soulseek_max_results"))
+    SOULSEEK_SHARE_DOWNLOADS = bool(SETTINGS.get("soulseek_share_downloads", True))
 
     # How much a search brings back, and how hard a download tries before giving up.
     SEARCH_RESULT_LIMIT = config.clamp("search_result_limit", SETTINGS.get("search_result_limit"))
@@ -674,6 +697,91 @@ def search_musicdl(query: str, kind: str, limit: int = 0) -> list[dict[str, Any]
     return results
 
 
+def soulseek_config() -> dict[str, Any]:
+    """The Soulseek-relevant slice of the current settings."""
+    return {
+        "soulseek_enabled": SOULSEEK_ENABLED,
+        "soulseek_username": SOULSEEK_USERNAME,
+        "soulseek_password": SOULSEEK_PASSWORD,
+        "soulseek_max_results": SOULSEEK_MAX_RESULTS,
+        "soulseek_share_downloads": SOULSEEK_SHARE_DOWNLOADS,
+        "download_dir": str(DOWNLOAD_DIR),
+    }
+
+
+def reconfigure_soulseek_async() -> None:
+    """Connect, reconnect, or stop the Soulseek client without blocking the page.
+
+    Runs after the setup page saves: the actual connect is lazy and off-thread, so
+    a slow or failed login never stalls saving preferences. Stopping a disabled
+    client also happens here, which releases the shared download folder.
+    """
+    if not soulseek.available():
+        return
+
+    def _run() -> None:
+        try:
+            soulseek.configure(soulseek_config())
+        except Exception:
+            # A wrong password or an unreachable network must not disturb the rest
+            # of the app; the next search or download reports the specific error.
+            pass
+
+    threading.Thread(
+        target=_run, daemon=True, name="requestcast-soulseek-configure"
+    ).start()
+
+
+def format_soulseek_result(item: dict[str, Any]) -> dict[str, Any] | None:
+    """A Soulseek search hit as a downloadable result, or None if unusable."""
+    username = str(item.get("username") or "").strip()
+    remote_path = str(item.get("remote_path") or "").strip()
+    if not username or not remote_path:
+        return None
+    title = clean_text(str(item.get("title") or "Untitled")) or "Untitled"
+    artist = clean_text(str(item.get("artist") or item.get("username") or "")) or username
+    payload = {
+        "source": "soulseek", "kind": "song",
+        "id": f"{username}::{remote_path}",
+        "source_id": remote_path, "video_id": "",
+        "title": title, "artist": artist, "album": "",
+        "duration_seconds": int(item.get("duration_s") or 0),
+        "track_number": 0, "disc_number": 0, "year": "", "isrc": "", "cover": "",
+        "username": username, "remote_path": remote_path,
+        "size_bytes": int(item.get("size_bytes") or 0),
+    }
+    detail_parts = [
+        part for part in (
+            artist, item.get("format") or "", item.get("file_size") or "",
+            item.get("availability") or "",
+        ) if part
+    ]
+    return {
+        **payload, "detail": " — ".join(detail_parts),
+        "preview_type": "", "preview": "", "token": signer.dumps(payload),
+    }
+
+
+def search_soulseek(query: str, kind: str, limit: int = 0) -> list[dict[str, Any]]:
+    """Search connected Soulseek peers. Only audio files are returned."""
+    if not SOULSEEK_ENABLED:
+        return []
+    if kind not in {"all", "song"}:
+        return []
+    if not soulseek.available():
+        raise RuntimeError(f"Soulseek is not available ({soulseek.import_error()}).")
+    wanted = limit or min(SEARCH_RESULT_LIMIT, SOULSEEK_MAX_RESULTS)
+    found = soulseek.search(query, soulseek_config())
+    results: list[dict[str, Any]] = []
+    for item in found:
+        formatted = format_soulseek_result(item)
+        if formatted:
+            results.append(formatted)
+        if len(results) >= wanted:
+            break
+    return results
+
+
 def format_duration(seconds: int) -> str:
     seconds = max(0, int(seconds or 0))
     hours, remainder = divmod(seconds, 3600)
@@ -916,6 +1024,8 @@ def search_sources() -> list[tuple[str, str]]:
     if MUSICDL_ENABLED:
         choices.insert(1, ("all", "YouTube, Deezer, and musicdl"))
         choices.append(("musicdl", "musicdl only"))
+    if SOULSEEK_ENABLED:
+        choices.append(("soulseek", "Soulseek only"))
     return choices
 
 
@@ -963,6 +1073,8 @@ def index():
                     tasks.append(("Deezer", pool.submit(search_deezer, query, kind, limit)))
                 if source in {"all", "musicdl"} and MUSICDL_ENABLED:
                     tasks.append(("musicdl", pool.submit(search_musicdl, query, kind, limit)))
+                if source == "soulseek" and SOULSEEK_ENABLED:
+                    tasks.append(("Soulseek", pool.submit(search_soulseek, query, kind, limit)))
                 for label, future in tasks:
                     try:
                         results.extend(future.result())
@@ -987,7 +1099,7 @@ def queue_download():
         payload = signer.loads(request.form.get("token", ""), max_age=86400)
     except (BadSignature, SignatureExpired):
         abort(400, "This search result expired. Search again and retry.")
-    if payload.get("source") not in {"youtube", "deezer", "musicdl"}:
+    if payload.get("source") not in {"youtube", "deezer", "musicdl", "soulseek"}:
         abort(400)
     action = request.form.get("action", "add")
     if action not in {"add", "add_request"}:
@@ -2079,6 +2191,26 @@ def expand_musicdl(item: dict[str, Any]) -> list[dict[str, Any]]:
     return [musicdl_track_entry(song_info) for song_info in song_infos]
 
 
+def expand_soulseek(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """A Soulseek result is a single file owned by one peer."""
+    username = str(item.get("username") or "").strip()
+    remote_path = str(item.get("remote_path") or "").strip()
+    if not username or not remote_path:
+        raise RuntimeError("That Soulseek result is missing its peer or file path.")
+    return [{
+        "source": "soulseek",
+        "source_id": remote_path,
+        "video_id": "",
+        "title": clean_text(str(item.get("title") or "")) or "Untitled",
+        "artist": clean_text(str(item.get("artist") or "")) or "Unknown Artist",
+        "album": "",
+        "duration_seconds": int(item.get("duration_seconds") or 0),
+        "track_number": 0, "disc_number": 0, "year": "", "isrc": "", "cover": "",
+        "username": username, "remote_path": remote_path,
+        "size_bytes": int(item.get("size_bytes") or 0),
+    }]
+
+
 def browse_item(result: dict[str, Any], detail: str = "") -> dict[str, Any]:
     """Reduce a search result to the fields the browse page shows and submits."""
     return {
@@ -2397,6 +2529,8 @@ def tag_id3(path: Path, track: dict[str, Any], cover: tuple[bytes, str] | None) 
     tags.add(TXXX(encoding=3, desc="SOURCE_ID", text=f"{track['source']}:{track['source_id']}"))
     if track.get("isrc"):
         tags.add(TXXX(encoding=3, desc="ISRC", text=track["isrc"]))
+    if track.get("lyrics"):
+        tags.add(USLT(encoding=3, lang="eng", desc="", text=track["lyrics"]))
     if cover:
         data, mime = cover
         tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=data))
@@ -2423,6 +2557,8 @@ def tag_mp4(path: Path, track: dict[str, Any], cover: tuple[bytes, str] | None) 
     audio["----:com.apple.iTunes:SOURCE_ID"] = [f"{track['source']}:{track['source_id']}".encode()]
     if track.get("isrc"):
         audio["----:com.apple.iTunes:ISRC"] = [str(track["isrc"]).encode()]
+    if track.get("lyrics"):
+        audio["\xa9lyr"] = [track["lyrics"]]
     if cover:
         data, mime = cover
         image_format = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
@@ -2446,6 +2582,7 @@ def tag_vorbis_or_flac(path: Path, track: dict[str, Any], cover: tuple[bytes, st
         "isrc": str(track.get("isrc") or ""),
         "comment": f"{track['source'].title()} request import",
         "source_id": f"{track['source']}:{track['source_id']}",
+        "lyrics": str(track.get("lyrics") or ""),
     }
     for key, value in values.items():
         if value:
@@ -2544,6 +2681,39 @@ def remux_or_preserve_audio(source: Path, temp_dir: Path) -> Path:
     if result.returncode != 0 or not lossless.exists():
         raise RuntimeError(result.stderr.strip() or "Could not convert the unsupported source to lossless FLAC.")
     return lossless
+
+
+def convert_audio_format(source: Path, temp_dir: Path, wanted_format: str) -> Path:
+    """Convert a downloaded file to the configured audio format, or leave it.
+
+    ``original`` (and anything unrecognized) keeps the source codec untouched.
+    mp3, flac, and opus run one ffmpeg pass; the source is re-encoded only when
+    its container is not already the requested one.
+    """
+    wanted = str(wanted_format or "").strip().lower()
+    extensions = {"mp3": ".mp3", "flac": ".flac", "opus": ".opus"}
+    if wanted in {"", "original"} or wanted not in extensions:
+        return source
+    if source.suffix.lower() == extensions[wanted]:
+        return source
+    target = temp_dir / f"converted{extensions[wanted]}"
+    codec_args = {
+        "mp3": ["-c:a", "libmp3lame", "-q:a", "0"],
+        "flac": ["-c:a", "flac", "-compression_level", "12"],
+        "opus": ["-c:a", "libopus", "-b:a", "256k"],
+    }[wanted]
+    result = subprocess.run(
+        [
+            FFMPEG, "-v", "error", "-y", "-i", str(source), "-map", "0:a:0",
+            "-vn", *codec_args, str(target),
+        ],
+        capture_output=True, text=True, timeout=1800, check=False,
+    )
+    if result.returncode != 0 or not target.exists():
+        raise RuntimeError(
+            result.stderr.strip() or f"Could not convert the audio to {wanted.upper()}."
+        )
+    return target
 
 
 def azuracast_headers() -> dict[str, str]:
@@ -2682,14 +2852,56 @@ def deezer_track_id(track: dict[str, Any]) -> str:
 
 
 def download_via_deezer(track: dict[str, Any], temp_dir: Path) -> Path:
-    """Fetch the track's audio from Deezer: FLAC, then 320 or 128 kbps MP3."""
+    """Fetch the track's audio from Deezer at the configured quality.
+
+    Deezer's own gateway metadata (title, artist, album, ISRC, release year,
+    track/disc numbers, and cover art) is authoritative, so it is folded back
+    into the track before tagging; the public search result is only the fallback.
+    """
     if DEEZER is None:
         raise deezer.DeezerError("No Deezer session is configured.")
     track_id = deezer_track_id(track)
     if not track_id:
         raise deezer.DeezerError("This track was not found on Deezer.")
-    downloaded, _quality = DEEZER.download(track_id, temp_dir)
+    downloaded, _quality = DEEZER.download(track_id, temp_dir, quality=DEEZER_QUALITY)
+    try:
+        meta = DEEZER.track_metadata(track_id)
+    except deezer.DeezerError:
+        meta = {}
+    for key in ("title", "artist", "album", "isrc", "year", "track_number", "disc_number", "duration_seconds", "cover"):
+        if meta.get(key):
+            track[key] = meta[key]
+    if not track.get("lyrics"):
+        track["lyrics"] = deezer.fetch_lrclib_lyrics(
+            str(track.get("artist", "")), str(track.get("title", "")),
+            str(track.get("album", "")), int(track.get("duration_seconds") or 0),
+        )
     return downloaded
+
+
+def download_via_soulseek(track: dict[str, Any], temp_dir: Path) -> Path:
+    """Fetch one file from a Soulseek peer into the temporary directory."""
+    if not SOULSEEK_ENABLED:
+        raise soulseek.SoulseekError("Soulseek is disabled in Preferences.")
+    if not soulseek.available():
+        raise soulseek.SoulseekError(f"Soulseek is not available ({soulseek.import_error()}).")
+    username = str(track.get("username") or "").strip()
+    remote_path = str(track.get("remote_path") or "").strip()
+    if not username or not remote_path:
+        raise soulseek.SoulseekError("That Soulseek result is missing its peer or file path.")
+    downloaded = soulseek.download(
+        {
+            "username": username,
+            "remote_path": remote_path,
+            "size_bytes": int(track.get("size_bytes") or 0),
+        },
+        soulseek_config(),
+        target_dir=temp_dir,
+    )
+    path = Path(str(downloaded))
+    if not path.is_file() or path.stat().st_size == 0:
+        raise soulseek.SoulseekError("Soulseek finished but produced no audio file.")
+    return path
 
 
 def download_via_musicdl(track: dict[str, Any], temp_dir: Path) -> Path:
@@ -2867,9 +3079,13 @@ def download_one(track: dict[str, Any], attempt: int = 0) -> tuple[str, Path, di
     with tempfile.TemporaryDirectory(prefix="requestcast-", dir=STATE_DIR) as temp_name:
         temp_dir = Path(temp_name)
         prepared: Path | None = None
+        # A Soulseek result is fetched straight from its peer; there is no
+        # catalog fallback, so its failures surface as the track's failure.
+        if track.get("source") == "soulseek":
+            prepared = download_via_soulseek(track, temp_dir)
         # A signed-in Deezer account is the default source. Anything it cannot
         # supply falls through to musicdl and then to the YouTube path below.
-        if track.get("source") != "musicdl" and DEEZER is not None:
+        if prepared is None and track.get("source") != "musicdl" and DEEZER is not None:
             try:
                 prepared = download_via_deezer(track, temp_dir)
             except Exception:
@@ -2926,6 +3142,7 @@ def download_one(track: dict[str, Any], attempt: int = 0) -> tuple[str, Path, di
                 raise RuntimeError("yt-dlp completed but did not produce an audio file.")
             downloaded = max(candidates, key=lambda path: path.stat().st_size)
             prepared = remux_or_preserve_audio(downloaded, temp_dir)
+            prepared = convert_audio_format(prepared, temp_dir, YOUTUBE_AUDIO_FORMAT)
         track["artist"] = clean_text(track.get("artist", "")) or "Unknown Artist"
         track["title"] = clean_youtube_title(track.get("title", "")) or "Untitled"
         tag_audio(prepared, track)
@@ -2971,6 +3188,8 @@ def process_job(job: sqlite3.Row) -> None:
             tracks = expand_youtube(payload)
         elif payload["source"] == "musicdl":
             tracks = expand_musicdl(payload)
+        elif payload["source"] == "soulseek":
+            tracks = expand_soulseek(payload)
         else:
             tracks = expand_deezer(payload)
     if not tracks:
@@ -3172,9 +3391,15 @@ def settings_page():
             "bind_host": request.form.get("bind_host", "").strip() or config.DEFAULT_BIND_HOST,
             "bind_port": request.form.get("bind_port", "").strip() or config.DEFAULT_BIND_PORT,
             "deezer_arl": request.form.get("deezer_arl", "").strip(),
+            "deezer_quality": request.form.get("deezer_quality", "").strip().lower() or deezer.DEFAULT_QUALITY,
+            "youtube_audio_format": request.form.get("youtube_audio_format", "").strip().lower() or "original",
             "musicdl_enabled": bool(request.form.get("musicdl_enabled")),
             "musicdl_sources": request.form.get("musicdl_sources", "").strip() or musicdl_source.DEFAULT_SOURCES,
             "search_musicdl": bool(request.form.get("search_musicdl")),
+            "soulseek_enabled": bool(request.form.get("soulseek_enabled")),
+            "soulseek_username": request.form.get("soulseek_username", "").strip(),
+            "soulseek_password": request.form.get("soulseek_password", ""),
+            "soulseek_share_downloads": bool(request.form.get("soulseek_share_downloads")),
             "auto_update_tools": bool(request.form.get("auto_update_tools")),
             "diagnostics_enabled": bool(request.form.get("diagnostics_enabled")),
         }
@@ -3183,7 +3408,7 @@ def settings_page():
         for key in (
             "search_result_limit", "download_retries", "download_retry_delay",
             "download_gap_seconds", "rate_limit_cooldown", "job_retry_limit",
-            "auto_update_interval_hours",
+            "auto_update_interval_hours", "soulseek_max_results",
         ):
             submitted[key] = config.clamp(
                 key, request.form.get(key, "").strip() or settings.get(key, config.FIELDS[key])
@@ -3226,6 +3451,7 @@ def settings_page():
         merged["state_dir"] = merged.get("state_dir") or str(config.default_state_dir())
         config.save(merged)
         apply_settings(config.load())
+        reconfigure_soulseek_async()
         session["authenticated"] = True
         session["admin_authenticated"] = True
         session.setdefault("nonce", uuid.uuid4().hex)
@@ -3268,6 +3494,13 @@ def validate_setup(
             problems.append("Enter the AzuraCast base API address, for example http://127.0.0.1:12000/api.")
         if not submitted.get("azuracast_api_key"):
             problems.append("Enter an AzuraCast API key, or turn AzuraCast off to use local downloads only.")
+    if submitted.get("soulseek_enabled"):
+        if not submitted.get("soulseek_username"):
+            problems.append("Enter a Soulseek username, or turn Soulseek off.")
+        if not submitted.get("soulseek_password"):
+            problems.append("Enter a Soulseek password, or turn Soulseek off.")
+        if not soulseek.available():
+            problems.append("Soulseek needs the aioslsk package, which is not installed. Turn Soulseek off to continue.")
     host = submitted.get("bind_host", "")
     no_password = clear_password or (not password and not PASSWORD_HASH)
     if require_passwords and not password:

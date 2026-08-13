@@ -1,25 +1,29 @@
-A request that AzuraCast declines under its own rules is no longer reported as a
-failed download.
+RequestCast gains an optional Soulseek source, finer control over Deezer and
+YouTube audio quality, and richer Deezer metadata and lyrics.
 
-**"Add & request" reports the truth when AzuraCast says no.** When a track is added
-successfully but AzuraCast declines to auto-queue the request — because the song or
-artist was played too recently, the song is already requested, or the track is not
-requestable — the job now finishes as completed with "Added successfully; AzuraCast did
-not accept the request" and the reason, instead of showing a red "failed" that read as
-though the download never happened. The file is still safely in the library and request
-playlist either way.
+**A Soulseek source for the tracks nothing else has.** Enable it in Preferences
+with a username and password, and a separate "Soulseek only" search appears alongside
+YouTube, Deezer, and musicdl. Results list peers, formats, and availability, and a
+download fetches the file straight from the chosen peer. Soulseek results have no
+catalog fallback — a peer that goes offline fails that one track rather than silently
+substituting another source. The download folder can be shared back to keep the network
+alive, and is off by default. Requests from peers who share nothing are refused, and
+folders split across drives no longer crash the share scanner.
 
-A settings file that cannot be written no longer costs you the tool update it was trying
-to record.
+**Deezer quality is now your choice.** The ARL setting previously always asked for
+FLAC and then dropped to 320 kbps MP3. Preferences now has a quality option: FLAC with
+a 320 kbps fallback (the default), or 320 kbps MP3 only. There is no silent drop to
+128 kbps — if the account cannot serve what you asked for, the track falls through to
+the next source.
 
-**Tool updates survive a read-only settings file.** When RequestCast installs or updates
-yt-dlp or Deno, it writes down where the new copy landed. If the settings file cannot be
-written — a service confined to a few writable paths, a portable copy on read-only media —
-that write failed loudly enough to take the update with it: the background updater thread
-died the first time it succeeded at anything, so yt-dlp was never checked again for as long
-as the program stayed running, and the "check for updates now" button returned an error
-after having updated the tools. Installing a missing tool mid-download failed the same way,
-reporting that the tool could not be installed when it just had been.
+**Deezer's own metadata, plus synced lyrics.** Deezer downloads now read the track's
+authoritative metadata from Deezer's gateway — title, artist, album, ISRC, release year,
+track and disc numbers, and cover art — instead of guessing from the search result.
+Deezer tracks also fetch synced lyrics from LRCLIB when available and tag them into the
+file next to the cover art.
 
-The tool is installed either way, and RequestCast looks in its own `tools` folder before
-PATH, so an unwritable settings file now costs nothing but the note of where the tool went.
+**YouTube audio format control.** A new setting decides what YouTube audio is delivered
+as. The default is "original", which keeps the source codec untouched — the
+quality-preserving behaviour RequestCast has always had. Converting to FLAC, MP3, or
+Opus is now an option for stations that prefer one container; converting to FLAC never
+adds quality, it only re-containers the audio.

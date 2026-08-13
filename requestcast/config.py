@@ -39,6 +39,7 @@ NUMERIC_LIMITS: dict[str, tuple[int, int]] = {
     "rate_limit_cooldown": (0, 3600),
     "job_retry_limit": (0, 10),
     "auto_update_interval_hours": (1, 720),
+    "soulseek_max_results": (10, 2000),
 }
 
 # Written by the setup page; read by everything else.
@@ -68,10 +69,23 @@ FIELDS: dict[str, Any] = {
     # by default; without it YouTube downloads lose formats and fail with 403.
     "deno_path": "",
     "deezer_arl": "",
+    # Deezer's own preference order: FLAC when the account can serve it (and falls
+    # back to 320 kbps MP3), or 320 kbps MP3 only.
+    "deezer_quality": "flac",
+    # What YouTube audio is delivered as. "original" keeps the source codec (the
+    # default and the quality-preserving choice); mp3, flac, and opus convert it.
+    "youtube_audio_format": "original",
     # musicdl is the fallback source between Deezer and YouTube, and also handles
     # the other platforms' URLs. Sources are musicdl client names, comma-separated.
     "musicdl_enabled": True,
     "musicdl_sources": "MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient",
+    # Soulseek is an optional peer-to-peer source. Enable it and enter an account in
+    # Preferences; downloads then search peers and share the download folder back.
+    "soulseek_enabled": False,
+    "soulseek_username": "",
+    "soulseek_password": "",
+    "soulseek_max_results": 500,
+    "soulseek_share_downloads": True,
     # How much a search brings back, per source and per result type. Each search page can
     # ask for a different number; this is the starting point the form offers.
     "search_result_limit": 50,
@@ -118,8 +132,15 @@ ENVIRONMENT_NAMES: dict[str, tuple[str, ...]] = {
     "ffprobe_path": ("REQUESTCAST_FFPROBE",),
     "deno_path": ("REQUESTCAST_DENO",),
     "deezer_arl": ("REQUESTCAST_DEEZER_ARL", "ADDTO_DEEZER_ARL"),
+    "deezer_quality": ("REQUESTCAST_DEEZER_QUALITY",),
+    "youtube_audio_format": ("REQUESTCAST_YOUTUBE_AUDIO_FORMAT",),
     "musicdl_enabled": ("REQUESTCAST_MUSICDL_ENABLED",),
     "musicdl_sources": ("REQUESTCAST_MUSICDL_SOURCES",),
+    "soulseek_enabled": ("REQUESTCAST_SOULSEEK_ENABLED",),
+    "soulseek_username": ("REQUESTCAST_SOULSEEK_USERNAME",),
+    "soulseek_password": ("REQUESTCAST_SOULSEEK_PASSWORD",),
+    "soulseek_max_results": ("REQUESTCAST_SOULSEEK_MAX_RESULTS",),
+    "soulseek_share_downloads": ("REQUESTCAST_SOULSEEK_SHARE_DOWNLOADS",),
     "search_result_limit": ("REQUESTCAST_SEARCH_LIMIT",),
     "search_musicdl": ("REQUESTCAST_SEARCH_MUSICDL",),
     "download_retries": ("REQUESTCAST_DOWNLOAD_RETRIES",),

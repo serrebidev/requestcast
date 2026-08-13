@@ -49,11 +49,62 @@ def fake_media_response(url, body, params=None):
 
 
 client._post_json = fake_media_response
-url, quality = client._stream_url("track-token")
+url, quality = client._stream_url("track-token", deezer.quality_formats("flac"))
 assert url == "https://cdn.test/audio"
 assert quality == "MP3_320"
 assert qualities == ["FLAC", "MP3_320"]
 print("quality_fallback_order=passed")
+
+
+# The quality setting chooses which Deezer formats are asked for, in order.
+assert deezer.quality_formats("flac") == ("FLAC", "MP3_320")
+assert deezer.quality_formats("mp3_320") == ("MP3_320",)
+assert deezer.quality_formats("FLAC") == ("FLAC", "MP3_320")
+assert deezer.quality_formats("") == ("FLAC", "MP3_320")
+assert deezer.quality_formats("unknown") == ("FLAC", "MP3_320")
+print("quality_formats_mapping=passed")
+
+
+# pageTrack metadata folds the web player's fields into a clean dict.
+meta_client = object.__new__(deezer.DeezerClient)
+meta_client._gateway = lambda method, params: {
+    "results": {
+        "DATA": {
+            "SNG_TITLE": "Dancing Queen", "ART_NAME": "ABBA", "ALB_TITLE": "Arrival",
+            "ISRC": "SEAYD7601020", "PHYSICAL_RELEASE_DATE": "1976-08-16",
+            "TRACK_NUMBER": "4", "DISK_NUMBER": "1", "DURATION": "231",
+            "ALB_PICTURE": "abc123def456",
+        }
+    }
+}
+meta = meta_client.track_metadata("3135556")
+assert meta["title"] == "Dancing Queen" and meta["artist"] == "ABBA"
+assert meta["album"] == "Arrival" and meta["isrc"] == "SEAYD7601020"
+assert meta["year"] == "1976" and meta["track_number"] == 4 and meta["disc_number"] == 1
+assert meta["duration_seconds"] == 231
+assert "e-cdns-images.dzcdn.net" in meta["cover"] and meta["cover"].endswith("abc123def456/1000x1000-000000-100-0-0.jpg")
+print("track_metadata=passed")
+
+
+# LRCLIB lyrics are optional enrichment: a miss returns an empty string, never raises.
+class LyricsResponse:
+    status_code = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+with patch.object(deezer.requests, "get", return_value=LyricsResponse({"syncedLyrics": "[00:01] You can dance"})):
+    assert deezer.fetch_lrclib_lyrics("ABBA", "Dancing Queen", "Arrival", 231) == "[00:01] You can dance"
+with patch.object(deezer.requests, "get", return_value=LyricsResponse({"plainLyrics": "plain words"})):
+    assert deezer.fetch_lrclib_lyrics("ABBA", "Dancing Queen") == "plain words"
+with patch.object(deezer.requests, "get", side_effect=deezer.requests.RequestException("down")):
+    assert deezer.fetch_lrclib_lyrics("ABBA", "Dancing Queen") == ""
+assert deezer.fetch_lrclib_lyrics("", "", "", 0) == ""
+print("lrclib_lyrics=passed")
 
 
 # The modern environment name wins, while the old ADDTO name remains supported.
@@ -83,13 +134,20 @@ class FakeDeezer:
         self.fail = fail
         self.calls = []
 
-    def download(self, track_id, destination_dir):
+    def download(self, track_id, destination_dir, quality=None):
         self.calls.append(track_id)
         if self.fail:
             raise deezer.DeezerError("stream refused")
         path = Path(destination_dir) / f"deezer-{track_id}.flac"
         path.write_bytes(b"fLaC-fake-audio")
         return path, "FLAC"
+
+    def track_metadata(self, track_id):
+        return {
+            "title": "Dancing Queen", "artist": "ABBA", "album": "Arrival",
+            "isrc": "SEAYD7601020", "year": "1976", "track_number": 4,
+            "disc_number": 1, "duration_seconds": 231, "cover": "https://img.test/cover.jpg",
+        }
 
 
 def run_download(track, fake, ytdlp_side_effect=None, found_song=None):
@@ -107,6 +165,7 @@ def run_download(track, fake, ytdlp_side_effect=None, found_song=None):
         patch.object(app, "tag_audio", lambda path, item: None),
         patch.object(app, "probe_audio", lambda path: {"codec_name": "mp3"}),
         patch.object(app, "find_deezer_song", return_value=found_song),
+        patch.object(app.deezer, "fetch_lrclib_lyrics", return_value="[00:01] test"),
     ]
     if ytdlp_side_effect is not None:
         patches.append(patch.object(app.subprocess, "run", side_effect=ytdlp_side_effect))
@@ -189,6 +248,7 @@ with (
     patch.object(app, "apply_settings"),
     patch.object(app, "SETTINGS", {"state_dir": "", "download_dir": "", "secret_key": "x"}),
     patch.object(app.config, "is_configured", return_value=False),
+    patch.object(app.soulseek, "available", return_value=True),
 ):
     response = client.post("/setup", data={
         "download_dir": tempfile.gettempdir(),
@@ -197,7 +257,21 @@ with (
         "password": "ListenerPass",
         "admin_password": "AdminPass",
         "deezer_arl": "a" * 192,
+        "deezer_quality": "mp3_320",
+        "youtube_audio_format": "flac",
+        "soulseek_enabled": "1",
+        "soulseek_username": "radio-listen",
+        "soulseek_password": "secret",
+        "soulseek_max_results": "120",
+        "soulseek_share_downloads": "1",
     })
 assert response.status_code == 302, response.status_code
 assert saved.get("deezer_arl") == "a" * 192, "the setup form must keep the ARL"
-print("setup_saves_deezer_arl=passed")
+assert saved.get("deezer_quality") == "mp3_320", saved.get("deezer_quality")
+assert saved.get("youtube_audio_format") == "flac", saved.get("youtube_audio_format")
+assert saved.get("soulseek_enabled") is True
+assert saved.get("soulseek_username") == "radio-listen"
+assert saved.get("soulseek_password") == "secret"
+assert saved.get("soulseek_max_results") == 120
+assert saved.get("soulseek_share_downloads") is True
+print("setup_saves_source_settings=passed")

@@ -76,7 +76,23 @@
   <label for="deezer_arl">Deezer ARL cookie (optional)</label>
   <input id="deezer_arl" name="deezer_arl" type="password"
          value="{{ settings.deezer_arl }}" autocomplete="off">
-  <p class="hint">Uses Deezer first: FLAC, then MP3. Falls back to musicdl, then YouTube. Stored locally.</p>
+  <p class="hint">Uses Deezer first. Falls back to musicdl, then YouTube. Stored locally.</p>
+  <label for="deezer_quality">Deezer quality</label>
+  <select id="deezer_quality" name="deezer_quality">
+    <option value="flac" {% if settings.deezer_quality == 'flac' %}selected{% endif %}>FLAC (falls back to 320 kbps MP3)</option>
+    <option value="mp3_320" {% if settings.deezer_quality == 'mp3_320' %}selected{% endif %}>320 kbps MP3</option>
+  </select>
+  <p class="hint">FLAC is lossless and the best radio source; the account must allow it.</p>
+
+  <h2>YouTube</h2>
+  <label for="youtube_audio_format">Audio format</label>
+  <select id="youtube_audio_format" name="youtube_audio_format">
+    <option value="original" {% if settings.youtube_audio_format == 'original' %}selected{% endif %}>Original (keep the source audio)</option>
+    <option value="opus" {% if settings.youtube_audio_format == 'opus' %}selected{% endif %}>Opus</option>
+    <option value="mp3" {% if settings.youtube_audio_format == 'mp3' %}selected{% endif %}>MP3</option>
+    <option value="flac" {% if settings.youtube_audio_format == 'flac' %}selected{% endif %}>FLAC</option>
+  </select>
+  <p class="hint">Original keeps YouTube's own audio untouched. Converting to FLAC never adds quality; it only matches a station that prefers FLAC files.</p>
 
   <h2>musicdl</h2>
   <label for="musicdl_enabled">
@@ -89,6 +105,29 @@
          value="{{ settings.musicdl_sources }}" autocomplete="off" spellcheck="false">
   <p class="hint">Tried between Deezer and YouTube, for example
     MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient.</p>
+
+  <h2>Soulseek</h2>
+  <p>Optional peer-to-peer source for tracks YouTube, Deezer, and musicdl cannot find.</p>
+  <label for="soulseek_enabled">
+    <input id="soulseek_enabled" name="soulseek_enabled" type="checkbox" value="1"
+           {% if settings.soulseek_enabled %}checked{% endif %}>
+    Enable Soulseek search and download
+  </label>
+  <label for="soulseek_username">Soulseek username</label>
+  <input id="soulseek_username" name="soulseek_username" type="text"
+         value="{{ settings.soulseek_username }}" autocomplete="off" spellcheck="false">
+  <label for="soulseek_password">Soulseek password</label>
+  <input id="soulseek_password" name="soulseek_password" type="password"
+         value="{{ settings.soulseek_password }}" autocomplete="off">
+  <label for="soulseek_max_results">Maximum Soulseek results per search</label>
+  <input id="soulseek_max_results" name="soulseek_max_results" type="number" min="10" max="2000"
+         value="{{ settings.soulseek_max_results }}" inputmode="numeric">
+  <label for="soulseek_share_downloads">
+    <input id="soulseek_share_downloads" name="soulseek_share_downloads" type="checkbox" value="1"
+           {% if settings.soulseek_share_downloads %}checked{% endif %}>
+    Share the download folder back with peers
+  </label>
+  <p class="hint">Sharing keeps Soulseek alive; leave it on unless this machine should only download.</p>
 
   <h2>Search</h2>
   <label for="search_result_limit">Results per source and result type</label>

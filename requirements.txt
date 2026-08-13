@@ -11,3 +11,4 @@ chardet==5.2.0
 waitress==3.0.2
 ytmusicapi==1.11.5
 musicdl==2.13.4
+aioslsk==1.6.3
