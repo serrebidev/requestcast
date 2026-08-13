@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -92,22 +93,31 @@ class FakeStream:
 
 
 class FakeProc:
-    def __init__(self):
+    def __init__(self, exit_after_wait=False):
         self.stdout = FakeStream()
         self.terminated = False
         self.killed = False
+        self.exit_after_wait = exit_after_wait
+        self._done = threading.Event()
 
     def poll(self):
-        return None
+        return 0 if (self.terminated or self.killed) else None
 
     def terminate(self):
         self.terminated = True
+        self._done.set()
 
     def wait(self, timeout=None):
+        # Blocks like a real child process: returns only once the process ends
+        # (terminate/kill here) or, for the watchdog test, once the source exits.
+        if self.exit_after_wait:
+            self._done.set()
+        self._done.wait(timeout)
         return 0
 
     def kill(self):
         self.killed = True
+        self._done.set()
 
 
 popen_calls = []
@@ -146,6 +156,37 @@ assert app.live_now() is None
 print("livestream_relay=passed")
 
 
+# When the source ends, the watchdog stops the lingering encoder, clears the
+# on-air record, and marks the live over so AutoDJ resumes.
+source_proc = FakeProc(exit_after_wait=True)  # stream ended: yt-dlp exits
+encoder_proc = FakeProc()  # encoder still feeding the harbor
+app._live_relay["procs"] = [source_proc, encoder_proc]
+app._live_relay["title"] = "Ending Live"
+app._live_relay["artist"] = "Channel"
+app._live_relay["video_id"] = "BkoZnfez9Y0"
+app._live_relay["started_at"] = int(app.time.time())
+with patch.object(app, "_push_live_ended") as ended:
+    app._live_watchdog(source_proc, encoder_proc)
+assert encoder_proc.terminated, "the encoder must stop when the source ends"
+assert app.live_now() is None
+ended.assert_called_once()
+print("livestream_end_returns_to_autodj=passed")
+
+
+# A stale watchdog (from a re-requested stream) never tears down the new relay.
+old_source, old_encoder = FakeProc(exit_after_wait=True), FakeProc()
+new_source, new_encoder = FakeProc(), FakeProc()
+app._live_relay["procs"] = [new_source, new_encoder]
+app._live_relay["video_id"] = "BkoZnfez9Y0"
+with patch.object(app, "_push_live_ended") as never_ended:
+    app._live_watchdog(old_source, old_encoder)
+assert not new_source.terminated and not new_encoder.terminated
+assert app.live_now() is not None, "the new relay must stay on air"
+never_ended.assert_not_called()
+app.stop_live_relay()
+print("stale_watchdog_leaves_new_relay_alone=passed")
+
+
 # The livestream title is pushed to Liquidsoap with the API key, escaped for the
 # telnet command.
 with (
@@ -167,6 +208,21 @@ with patch.object(app.requests, "post") as never:
     app._push_live_metadata("X", "Y")
 never.assert_not_called()
 print("livestream_metadata_push=passed")
+
+
+# The end-of-live push clears the live flag so the on-air status stops claiming live.
+with (
+    patch.object(app, "AZURACAST_LIVE_METADATA_URL", "http://liquid:8004/telnet"),
+    patch.object(app, "AZURACAST_LIVE_METADATA_KEY", "api-secret"),
+    patch.object(app.requests, "post") as ended_post,
+):
+    app._push_live_ended()
+ended_post.assert_called_once()
+assert b'custom_metadata.insert is_live="false"' in ended_post.call_args.kwargs["data"]
+with patch.object(app.requests, "post") as never_ended:
+    app._push_live_ended()
+never_ended.assert_not_called()
+print("livestream_ended_push=passed")
 
 
 # Starting a second relay stops the first, and a missing harbor URL fails clearly.

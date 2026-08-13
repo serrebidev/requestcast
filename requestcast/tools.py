@@ -94,6 +94,8 @@ def missing_tools(settings: dict) -> list[str]:
         missing.append("yt-dlp")
     if not find_tool("ffmpeg", settings.get("ffmpeg_path", "")):
         missing.append("ffmpeg")
+    if not find_tool("ffprobe", settings.get("ffprobe_path", "")):
+        missing.append("ffprobe")
     if not find_tool("deno", settings.get("deno_path", "")):
         missing.append("deno")
     return missing
@@ -115,7 +117,7 @@ def installable_tools(settings: dict) -> list[str]:
     missing = missing_tools(settings)
     available = []
     for name in missing:
-        if name == "ffmpeg" and os.name != "nt":
+        if name in {"ffmpeg", "ffprobe"} and os.name != "nt":
             continue
         if name == "deno" and not deno_asset():
             continue
@@ -556,7 +558,7 @@ def install_missing(settings: dict, progress: ProgressCallback | None = None) ->
     missing = installable_tools(settings)
     if "yt-dlp" in missing:
         updates["ytdlp_path"] = install_ytdlp(progress)
-    if "ffmpeg" in missing:
+    if "ffmpeg" in missing or "ffprobe" in missing:
         ffmpeg_path, ffprobe_path = install_ffmpeg(progress)
         updates["ffmpeg_path"] = ffmpeg_path
         updates["ffprobe_path"] = ffprobe_path

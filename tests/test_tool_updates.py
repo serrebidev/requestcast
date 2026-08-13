@@ -210,6 +210,12 @@ try:
     assert tools.can_auto_install() is True
     print("deno_is_a_required_tool=passed")
 
+    # ffprobe is a required tool alongside ffmpeg, and is reported when missing.
+    with patch.object(tools, "find_tool", return_value=""):
+        missing = tools.missing_tools({})
+        assert "ffmpeg" in missing and "ffprobe" in missing, missing
+    print("ffprobe_is_a_required_tool=passed")
+
     # musicdl is upgraded from PyPI when a newer release exists.
     with (
         patch.object(tools, "installed_package_version", return_value="2.3.6"),

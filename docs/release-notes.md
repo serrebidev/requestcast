@@ -1,17 +1,16 @@
-Livestream requests now play immediately instead of hanging in the queue, and the
-livestream title is pushed to Liquidsoap.
+Livestreams now hand the air back to AutoDJ by themselves when they end, and
+ffprobe is tracked as a required tool.
 
-**Livestreams fail fast and never retry.** A livestream that is queued behind an
-older job (or that can't be relayed) used to sit in the queue as "waiting for the
-downloader" forever — the downloader kept trying to grab a stream that never ends.
-Livestream downloads now raise a distinct `LiveStreamError` that fails the job
-immediately with a clear message and is excluded from automatic retries and
-requeues, so nothing blocks the queue.
+**Auto-return to AutoDJ.** When a relayed livestream ends, yt-dlp exits but the
+ffmpeg encoder can linger on the harbor feeding silence, which keeps the station
+stuck on a dead live source. A watchdog now waits on the source process and, the
+moment it ends, stops the encoder, clears the on-air record, and pushes
+`is_live="false"` to Liquidsoap — so AutoDJ resumes automatically and the
+now-playing display stops claiming a live stream. The watcher is keyed on the
+actual process handles, so re-requesting the same stream can never let a stale
+watcher tear down the new relay.
 
-**Livestream metadata is pushed to air.** When a livestream is relayed, the
-stream's title and artist are pushed to Liquidsoap via `custom_metadata.insert`
-right after the harbor switch, and refreshed periodically while it plays — so the
-on-air display shows the actual stream title instead of a stale AutoDJ track.
-Configured with `azuracast_live_metadata_url` (the telnet/API endpoint) and
-`azuracast_live_metadata_key`, or on a server
-`REQUESTCAST_AZURACAST_LIVE_METADATA_URL` / `REQUESTCAST_AZURACAST_LIVE_METADATA_KEY`.
+**ffprobe is a required tool.** The missing-tools check (setup page, diagnostics,
+and automatic install) now includes ffprobe alongside ffmpeg, so a station with
+ffmpeg but no ffprobe is reported clearly and, on Windows, both are installed
+together.

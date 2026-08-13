@@ -2972,6 +2972,61 @@ def _push_live_metadata(title: str, artist: str) -> None:
         pass
 
 
+def _push_live_ended() -> None:
+    """Tell Liquidsoap that the live relay is over.
+
+    The sticky ``is_live="true"`` flag pushed while the stream played would
+    otherwise keep claiming a live source after the harbor has disconnected and
+    Liquidsoap has fallen back to AutoDJ. Clearing it here keeps the on-air
+    status honest. Like the live title push, this is best-effort enrichment.
+    """
+    url = AZURACAST_LIVE_METADATA_URL
+    key = AZURACAST_LIVE_METADATA_KEY
+    if not url or not key:
+        return
+    try:
+        requests.post(
+            url, data=b'custom_metadata.insert is_live="false"',
+            headers={"x-liquidsoap-api-key": key},
+            timeout=5,
+        )
+    except requests.RequestException:
+        pass
+
+
+def _live_watchdog(source_proc: subprocess.Popen, encoder_proc: subprocess.Popen) -> None:
+    """Hand the air back to AutoDJ automatically when the relay's source ends.
+
+    When the livestream ends, yt-dlp exits and the pipe to ffmpeg closes, but the
+    encoder can linger on the harbor for a while feeding silence. This thread
+    waits on the source process (yt-dlp), then — only if these two processes are
+    still the current relay — stops the encoder, clears the on-air record, and
+    pushes ``is_live="false"`` so Liquidsoap's live_fallback resumes AutoDJ and
+    the now-playing display stops claiming a live stream. Keying on the process
+    objects rather than the video id means re-requesting the same stream (which
+    reuses the id) cannot let a stale watcher tear down the new relay.
+    """
+    try:
+        source_proc.wait()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    with _live_lock:
+        if _live_relay["procs"] != [source_proc, encoder_proc]:
+            return  # stopped by hand or replaced by a newer relay
+        _live_relay["procs"] = []
+        _live_relay["title"] = ""
+        _live_relay["artist"] = ""
+        _live_relay["video_id"] = ""
+        _live_relay["started_at"] = 0
+    for proc in (source_proc, encoder_proc):
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+    _push_live_ended()
+
+
 def _metadata_loop(title: str, artist: str, video_id: str) -> None:
     """Keep the livestream's title on air for the life of this relay.
 
@@ -3062,6 +3117,10 @@ def play_live_stream(track: dict[str, Any]) -> str:
     threading.Thread(
         target=_metadata_loop, args=(title, artist, video_id),
         daemon=True, name="requestcast-live-metadata",
+    ).start()
+    threading.Thread(
+        target=_live_watchdog, args=(ytdlp_proc, ffmpeg_proc),
+        daemon=True, name="requestcast-live-watchdog",
     ).start()
     return f"Live stream is on air: {display}"
 
