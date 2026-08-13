@@ -1,3 +1,14 @@
+A request that AzuraCast declines under its own rules is no longer reported as a
+failed download.
+
+**"Add & request" reports the truth when AzuraCast says no.** When a track is added
+successfully but AzuraCast declines to auto-queue the request — because the song or
+artist was played too recently, the song is already requested, or the track is not
+requestable — the job now finishes as completed with "Added successfully; AzuraCast did
+not accept the request" and the reason, instead of showing a red "failed" that read as
+though the download never happened. The file is still safely in the library and request
+playlist either way.
+
 A settings file that cannot be written no longer costs you the tool update it was trying
 to record.
 

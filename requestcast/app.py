@@ -2650,6 +2650,27 @@ def submit_azuracast_request(unique_id: str, request_ip: str) -> str:
     return str(result.get("message") or "The track was requested successfully.")
 
 
+# AzuraCast answers that mean the file itself was accepted but the automatic
+# request was declined under the station's own request rules. They are not
+# download failures: the track is safely in the library and request playlist.
+REQUEST_REFUSAL_SIGNS = (
+    "played too recently",
+    "already requested",
+    "not requestable",
+)
+
+
+def request_refused(message: str) -> bool:
+    """True when AzuraCast declined the request rather than the request failing.
+
+    These come back when the station's request policy applies — the track was
+    played too recently, is already queued, or is not in a requestable playlist.
+    The add succeeded; only the automatic request was declined.
+    """
+    lowered = str(message).lower()
+    return any(sign in lowered for sign in REQUEST_REFUSAL_SIGNS)
+
+
 def deezer_track_id(track: dict[str, Any]) -> str:
     """The Deezer track ID for this track, looking it up by artist/title if needed."""
     if track.get("source") == "deezer":
@@ -2974,7 +2995,15 @@ def process_job(job: sqlite3.Row) -> None:
                 )
                 detail += f" {request_message}"
             except Exception as exc:
-                errors.append(f"Added successfully, but request submission failed: {exc}")
+                message = str(exc)
+                if request_refused(message):
+                    # The track is safely in the library and request playlist;
+                    # AzuraCast only declined to auto-queue the request under its
+                    # own rules. Say so clearly instead of marking the job failed,
+                    # which reads as though the download never happened.
+                    detail += f" Added successfully; AzuraCast did not accept the request: {message}"
+                else:
+                    errors.append(f"Added successfully, but request submission failed: {message}")
     if errors:
         detail += f" {len(errors)} failed."
     update_job(job_id, state="completed", detail=detail, error="\n".join(errors)[:8000])

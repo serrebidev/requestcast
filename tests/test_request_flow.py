@@ -53,3 +53,30 @@ local_detail = local_update.call_args_list[-1].kwargs
 assert local_detail["state"] == "completed"
 assert "saved to" in local_detail["detail"], local_detail["detail"]
 print("local_only_worker_flow=passed")
+
+
+# A request declined under AzuraCast's own rules is not a failed download: the
+# job stays completed, reports the add succeeded, and carries no error field.
+with (
+    patch.object(app, "AZURACAST_ENABLED", True),
+    patch.object(app, "expand_youtube", return_value=[dict(track)]),
+    patch.object(app, "download_one", return_value=("downloaded", Path("/tmp/test.mp3"), media)),
+    patch.object(
+        app,
+        "submit_azuracast_request",
+        side_effect=RuntimeError(
+            "Cannot submit request: This song or artist has been played too recently. "
+            "Wait a while before requesting it again."
+        ),
+    ),
+    patch.object(app, "update_job") as refusal_update,
+):
+    app.process_job(dict(job))
+
+refusal_detail = refusal_update.call_args_list[-1].kwargs
+assert refusal_detail["state"] == "completed"
+assert "Added successfully" in refusal_detail["detail"], refusal_detail["detail"]
+assert "AzuraCast did not accept the request" in refusal_detail["detail"], refusal_detail["detail"]
+assert "failed" not in refusal_detail["detail"].lower(), refusal_detail["detail"]
+assert not refusal_detail["error"], refusal_detail["error"]
+print("policy_refusal_not_a_failure=passed")
