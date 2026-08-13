@@ -698,7 +698,13 @@ def search_musicdl(query: str, kind: str, limit: int = 0) -> list[dict[str, Any]
 
 
 def soulseek_config() -> dict[str, Any]:
-    """The Soulseek-relevant slice of the current settings."""
+    """The Soulseek-relevant slice of the current settings.
+
+    The download folder is where the working copy keeps files in local mode, and
+    the shared folder is what peers can download. With AzuraCast enabled that is
+    the station's media library — sharing the radio's music back is the default —
+    and without it the download folder is shared instead.
+    """
     return {
         "soulseek_enabled": SOULSEEK_ENABLED,
         "soulseek_username": SOULSEEK_USERNAME,
@@ -706,6 +712,7 @@ def soulseek_config() -> dict[str, Any]:
         "soulseek_max_results": SOULSEEK_MAX_RESULTS,
         "soulseek_share_downloads": SOULSEEK_SHARE_DOWNLOADS,
         "download_dir": str(DOWNLOAD_DIR),
+        "share_dir": str(MEDIA_DIR),
     }
 
 

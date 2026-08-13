@@ -237,9 +237,37 @@ try:
     assert "portable" in frozen["message"], frozen
     print("frozen_build_reports_bundled_musicdl=passed")
 
+    # A deployment venv that is root-owned or systemd-hardened read-only is left
+    # alone: it updates with the deployment, and the updater must not fail every cycle.
+    with (
+        patch.object(config, "is_frozen", return_value=False),
+        patch.object(tools, "_pip_target_writable", return_value=False),
+        patch.object(tools, "_run") as never_pip,
+    ):
+        readonly = tools._pip_upgrade("musicdl")
+    assert readonly["status"] == "skipped", readonly
+    assert "deployment" in readonly["message"], readonly
+    never_pip.assert_not_called()
+    print("readonly_environment_skips_musicdl=passed")
+
+    # A read-only-filesystem error from pip is recognised and reported as a skip too,
+    # rather than a broken tool.
+    with (
+        patch.object(config, "is_frozen", return_value=False),
+        patch.object(tools, "_pip_target_writable", return_value=True),
+        patch.object(tools, "_run", return_value=completed(
+            1, stderr="Read-only file system: /opt/requestcast/.venv/bin/musicdl",
+        )),
+    ):
+        readonly_pip = tools._pip_upgrade("musicdl")
+    assert readonly_pip["status"] == "skipped", readonly_pip
+    assert "deployment" in readonly_pip["message"], readonly_pip
+    print("pip_readonly_error_is_a_skip=passed")
+
     # A pip failure is reported rather than raised.
     with (
         patch.object(config, "is_frozen", return_value=False),
+        patch.object(tools, "_pip_target_writable", return_value=True),
         patch.object(tools, "_run", return_value=completed(1, stderr="No matching distribution")),
     ):
         broken = tools._pip_upgrade("musicdl")

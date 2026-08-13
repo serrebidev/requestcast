@@ -378,12 +378,49 @@ def update_ytdlp(settings: dict, progress: ProgressCallback | None = None) -> di
     )
 
 
+def _pip_target_writable() -> bool:
+    """Whether pip can write into the interpreter that is running us.
+
+    A deployment venv is commonly root-owned (so the service user cannot write
+    into it) or made read-only by systemd hardening. pip then cannot upgrade a
+    package in place, and the attempt fails with a read-only-filesystem error on
+    every update cycle. Such a venv belongs to the deployment, which upgrades it
+    from requirements.txt on deploy, so RequestCast leaves it alone instead.
+    """
+    try:
+        import sysconfig
+
+        target = sysconfig.get_paths().get("purelib", "") or sys.prefix
+    except Exception:
+        target = sys.prefix
+    try:
+        return bool(target) and os.access(target, os.W_OK)
+    except OSError:
+        return False
+
+
+_READ_ONLY_MARKERS = (
+    "read-only file system",
+    "readonly file system",
+    "permission denied",
+    "operation not permitted",
+    "[errno 30]",
+    "[errno 13]",
+)
+
+
 def _pip_upgrade(name: str) -> dict[str, Any]:
     """Upgrade one package in the interpreter that is running us."""
     if config.is_frozen():
         return _result(
             name, "skipped",
             f"{name} is built into this portable copy of RequestCast and updates with it.",
+        )
+    if not _pip_target_writable():
+        return _result(
+            name, "skipped",
+            f"{name} is installed in a read-only environment, so it updates with the "
+            "deployment. RequestCast left it alone.",
         )
     command = [
         sys.executable, "-m", "pip", "install", "--upgrade",
@@ -395,7 +432,14 @@ def _pip_upgrade(name: str) -> dict[str, Any]:
         return _result(name, "failed", f"{name} could not be upgraded: {exc}")
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
-        return _result(name, "failed", f"{name} could not be upgraded: {detail[-1] if detail else 'pip failed'}")
+        message = detail[-1] if detail else "pip failed"
+        if any(marker in message.casefold() for marker in _READ_ONLY_MARKERS):
+            return _result(
+                name, "skipped",
+                f"{name} is installed in a read-only environment, so it updates with the "
+                "deployment. RequestCast left it alone.",
+            )
+        return _result(name, "failed", f"{name} could not be upgraded: {message}")
     return _result(name, "updated", f"Upgraded {name} to {installed_package_version(name) or 'the newest release'}.")
 
 

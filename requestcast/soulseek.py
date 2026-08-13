@@ -244,11 +244,16 @@ def _normal_path(value: str) -> str:
 def _config_snapshot(settings: dict[str, Any]) -> dict[str, Any]:
     """Copy only the Soulseek-relevant settings out of the full settings dict."""
     download_dir = str(settings.get("download_dir", "") or "").strip()
+    share_dir = str(settings.get("share_dir", "") or "").strip() or download_dir
     return {
         "enabled": bool(settings.get("soulseek_enabled", False)),
         "username": str(settings.get("soulseek_username", "") or "").strip(),
         "password": str(settings.get("soulseek_password", "") or ""),
         "download_dir": os.path.abspath(download_dir) if download_dir else "",
+        # What peers can download. The caller points this at the AzuraCast media
+        # folder when one is configured, so the radio's library is shared rather
+        # than the transient download folder.
+        "share_dir": os.path.abspath(share_dir) if share_dir else "",
         "share_downloads": bool(settings.get("soulseek_share_downloads", True)),
         "max_results": int(settings.get("soulseek_max_results", 500) or 500),
         "block_leechers": True,
@@ -283,8 +288,10 @@ def _build_settings(snapshot: dict[str, Any]):
     settings.shares.download = snapshot["download_dir"]
     settings.shares.scan_on_start = False
     if snapshot["share_downloads"]:
+        share_dir = snapshot.get("share_dir") or snapshot["download_dir"]
+        os.makedirs(share_dir, exist_ok=True)
         settings.shares.directories = [
-            SharedDirectorySettingEntry(path=snapshot["download_dir"])
+            SharedDirectorySettingEntry(path=share_dir)
         ]
         settings.shares.scan_on_start = True
     settings.network.server.reconnect.auto = True

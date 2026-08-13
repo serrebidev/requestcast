@@ -30,7 +30,8 @@ It runs two ways from the same code: a **portable Windows program** you double-c
 - Prefers **Deezer's copy of a track's metadata** when one matches cleanly, so artist, title,
   album, year, and ISRC come out right instead of guessed from a video title
 - Optional **Soulseek** source for tracks the other sources do not carry: search peers, pick
-  the best result, and optionally share the download folder back so the network stays alive
+  the best result, and optionally share your library back — the AzuraCast media folder when
+  one is configured, else the download folder — so the network stays alive
 - Fetches **synced lyrics** from LRCLIB for Deezer downloads and tags them alongside the cover
   art
 - Artist-only lines take that artist's **entire catalogue** by default, or a cap you choose
@@ -160,7 +161,9 @@ only**, through its public API.
 With `REQUESTCAST_SOULSEEK_ENABLED=1` and a username and password, a separate **Soulseek**
 search appears and can download files straight from peers. Soulseek results have no catalog
 fallback, so a peer that goes offline fails that one track rather than silently substituting
-another source. Set `REQUESTCAST_SOULSEEK_SHARE_DOWNLOADS=0` to download without sharing back.
+another source. By default the station's AzuraCast media folder is shared back to peers
+(the download folder is shared when AzuraCast is off); set `REQUESTCAST_SOULSEEK_SHARE_DOWNLOADS=0`
+to download without sharing anything.
 
 musicdl also widens URL input: pasting a track or playlist URL from any platform it
 supports (NetEase, QQ Music, Kugou, Kuwo, Migu, Qianqian, Spotify, SoundCloud, TIDAL,

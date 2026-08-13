@@ -31,12 +31,17 @@ snapshot = soulseek._config_snapshot({
     "soulseek_max_results": 120,
     "soulseek_share_downloads": False,
     "download_dir": "C:\\music",
+    "share_dir": "C:\\radio-media",
 })
 assert snapshot["enabled"] is True
 assert snapshot["username"] == "radio-listen"
 assert snapshot["max_results"] == 120
 assert snapshot["share_downloads"] is False
 assert snapshot["download_dir"] == os.path.abspath("C:\\music")
+assert snapshot["share_dir"] == os.path.abspath("C:\\radio-media")
+# Without an explicit share folder the download folder is shared instead.
+fallback = soulseek._config_snapshot({"download_dir": "C:\\music", "soulseek_enabled": True})
+assert fallback["share_dir"] == os.path.abspath("C:\\music")
 assert snapshot["block_leechers"] is True
 print("soulseek_config_snapshot=passed")
 
@@ -109,6 +114,26 @@ with patch.object(app, "SOULSEEK_ENABLED", True), patch.object(app, "MUSICDL_ENA
 with patch.object(app, "SOULSEEK_ENABLED", False):
     assert all(value != "soulseek" for value, _label in app.search_sources())
 print("soulseek_search_source=passed")
+
+
+# The shared folder defaults to the AzuraCast media library; the download folder
+# stays the working directory for local mode and is only shared without AzuraCast.
+with (
+    patch.object(app, "AZURACAST_ENABLED", True),
+    patch.object(app, "MEDIA_DIR", Path("C:\\radio-media")),
+    patch.object(app, "DOWNLOAD_DIR", Path("C:\\downloads")),
+):
+    azuracast_cfg = app.soulseek_config()
+assert azuracast_cfg["share_dir"] == "C:\\radio-media"
+assert azuracast_cfg["download_dir"] == "C:\\downloads"
+with (
+    patch.object(app, "AZURACAST_ENABLED", False),
+    patch.object(app, "MEDIA_DIR", Path("C:\\downloads")),
+    patch.object(app, "DOWNLOAD_DIR", Path("C:\\downloads")),
+):
+    local_cfg = app.soulseek_config()
+assert local_cfg["share_dir"] == "C:\\downloads"
+print("soulseek_shares_azuracast_media_by_default=passed")
 
 
 # The YouTube audio-format setting keeps the source untouched unless a real

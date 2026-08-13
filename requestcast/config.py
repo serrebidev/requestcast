@@ -80,7 +80,8 @@ FIELDS: dict[str, Any] = {
     "musicdl_enabled": True,
     "musicdl_sources": "MiguMusicClient,NeteaseMusicClient,QQMusicClient,KuwoMusicClient,QianqianMusicClient",
     # Soulseek is an optional peer-to-peer source. Enable it and enter an account in
-    # Preferences; downloads then search peers and share the download folder back.
+    # Preferences; downloads then search peers and share the music library back
+    # (the AzuraCast media folder when one is configured, else the download folder).
     "soulseek_enabled": False,
     "soulseek_username": "",
     "soulseek_password": "",
