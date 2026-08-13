@@ -86,6 +86,15 @@
   <p class="hint">The station's live/DJ input, for example
     icecast://automation:PASSWORD@127.0.0.1:8005/live. AzuraCast shows the source
     password under Station profile, Broadcasting.</p>
+  <label for="azuracast_live_metadata_url">Liquidsoap metadata API address (optional)</label>
+  <input id="azuracast_live_metadata_url" name="azuracast_live_metadata_url" type="text"
+         value="{{ settings.azuracast_live_metadata_url }}" autocomplete="off" spellcheck="false">
+  <label for="azuracast_live_metadata_key">Liquidsoap metadata API key (optional)</label>
+  <input id="azuracast_live_metadata_key" name="azuracast_live_metadata_key" type="password"
+         value="{{ settings.azuracast_live_metadata_key }}" autocomplete="off">
+  <p class="hint">Pushes the livestream's title to the air. AzuraCast finds the key under
+    Station profile, Broadcasting, Liquidsoap API. Leave both blank to relay without a
+    pushed title.</p>
 
   <h2>Deezer</h2>
   <label for="deezer_arl">Deezer ARL cookie (optional)</label>

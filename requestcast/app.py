@@ -128,6 +128,8 @@ REQUEST_PLAYLIST_ID = ""
 UPLOAD_DIR = config.DEFAULT_UPLOAD_DIRECTORY
 AZURACAST_LIVE_ENABLED = False
 AZURACAST_LIVE_URL = ""
+AZURACAST_LIVE_METADATA_URL = ""
+AZURACAST_LIVE_METADATA_KEY = ""
 SECRET_KEY = ""
 PASSWORD_SALT = b""
 PASSWORD_HASH = b""
@@ -165,6 +167,7 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     global SETTINGS, STATE_DIR, DOWNLOAD_DIR, MEDIA_DIR, DB_PATH, YTDLP, FFMPEG, FFPROBE, DENO
     global AZURACAST_ENABLED, AZURACAST_API_BASE, AZURACAST_API_KEY, STATION_ID
     global REQUEST_PLAYLIST_ID, UPLOAD_DIR, AZURACAST_LIVE_ENABLED, AZURACAST_LIVE_URL
+    global AZURACAST_LIVE_METADATA_URL, AZURACAST_LIVE_METADATA_KEY
     global SECRET_KEY, PASSWORD_SALT, PASSWORD_HASH
     global ADMIN_PASSWORD_SALT, ADMIN_PASSWORD_HASH, signer
     global DEEZER, DEEZER_ERROR
@@ -195,6 +198,8 @@ def apply_settings(new_settings: dict[str, Any] | None = None) -> None:
     UPLOAD_DIR = str(SETTINGS.get("azuracast_upload_dir") or config.DEFAULT_UPLOAD_DIRECTORY)
     AZURACAST_LIVE_ENABLED = bool(SETTINGS.get("azuracast_live_enabled"))
     AZURACAST_LIVE_URL = str(SETTINGS.get("azuracast_live_url", "") or "").strip()
+    AZURACAST_LIVE_METADATA_URL = str(SETTINGS.get("azuracast_live_metadata_url", "") or "").strip()
+    AZURACAST_LIVE_METADATA_KEY = str(SETTINGS.get("azuracast_live_metadata_key", "") or "").strip()
     # Without AzuraCast the downloads folder is the final destination for finished audio.
     MEDIA_DIR = Path(SETTINGS["azuracast_media_dir"]) if (
         AZURACAST_ENABLED and SETTINGS.get("azuracast_media_dir")
@@ -2874,6 +2879,14 @@ def request_refused(message: str) -> bool:
 # station's live harbor — the same Liquidsoap "DJ" input the relay scripts feed —
 # and Liquidsoap's live_fallback switch puts it on air about 13 seconds later.
 
+class LiveStreamError(RuntimeError):
+    """A livestream reached the downloader; it can never be downloaded.
+
+    Raised instead of an ordinary download failure so the retry machinery knows
+    there is no point trying again: a live stream will not become a recording.
+    """
+
+
 _live_lock = threading.Lock()
 _live_relay: dict[str, Any] = {
     "procs": [],  # subprocess.Popen handles; yt-dlp first, then ffmpeg
@@ -2926,6 +2939,55 @@ def stop_live_relay() -> bool:
         except subprocess.TimeoutExpired:
             proc.kill()
     return stopped
+
+
+def _push_live_metadata(title: str, artist: str) -> None:
+    """Send the now-playing title for the live source to Liquidsoap.
+
+    The relay's icecast source headers already carry a title, but Liquidsoap
+    metadata is sticky and a stale AutoDJ track can freeze as the displayed title
+    once the live-fallback switch happens. Pushing ``custom_metadata.insert``
+    after the switch — and again periodically — keeps the right title on air.
+    Metadata is enrichment: any failure is ignored rather than stopping the relay.
+    """
+    url = AZURACAST_LIVE_METADATA_URL
+    key = AZURACAST_LIVE_METADATA_KEY
+    if not url or not key:
+        return
+
+    def escaped(value: str) -> str:
+        return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+    fields = [f'title="{escaped(title)}"', 'is_live="true"']
+    if artist:
+        fields.append(f'artist="{escaped(artist)}"')
+    command = "custom_metadata.insert " + ",".join(fields)
+    try:
+        requests.post(
+            url, data=command.encode("utf-8"),
+            headers={"x-liquidsoap-api-key": key},
+            timeout=5,
+        )
+    except requests.RequestException:
+        pass
+
+
+def _metadata_loop(title: str, artist: str, video_id: str) -> None:
+    """Keep the livestream's title on air for the life of this relay.
+
+    Liquidsoap's live_fallback takes a few seconds to switch to the harbor source
+    (this station's dj_buffer is 10 seconds), and a title pushed before that switch
+    is superseded by it. So the first push waits for the switch to settle, then a
+    refresh every 30 seconds keeps the title current across source reconnects. The
+    loop exits once this relay is stopped or replaced by another.
+    """
+    time.sleep(20)
+    while True:
+        current = live_now()
+        if not current or current.get("video_id") != video_id:
+            return
+        _push_live_metadata(title, artist)
+        time.sleep(30)
 
 
 def play_live_stream(track: dict[str, Any]) -> str:
@@ -2997,6 +3059,10 @@ def play_live_stream(track: dict[str, Any]) -> str:
         _live_relay["artist"] = artist
         _live_relay["video_id"] = video_id
         _live_relay["started_at"] = int(time.time())
+    threading.Thread(
+        target=_metadata_loop, args=(title, artist, video_id),
+        daemon=True, name="requestcast-live-metadata",
+    ).start()
     return f"Live stream is on air: {display}"
 
 
@@ -3151,6 +3217,9 @@ def download_track(
         try:
             status, _path, media = download_one(track, attempt - 1)
             return status, media
+        except LiveStreamError:
+            # A livestream will never become a recording; retrying it is pointless.
+            raise
         except Exception as exc:
             last_error = exc
             if attempt >= attempts:
@@ -3230,7 +3299,7 @@ def download_one(track: dict[str, Any], attempt: int = 0) -> tuple[str, Path, di
     source_id = safe_filename(str(track.get("source_id") or video_id), video_id)
     stem = f"{safe_filename(track.get('artist', 'Unknown Artist'))} - {safe_filename(track.get('title', 'Untitled'))} [{track['source']}-{source_id}]"
     if track.get("is_live"):
-        raise RuntimeError(
+        raise LiveStreamError(
             "This is a YouTube livestream, not a recording, so it cannot be downloaded. "
             "Choose Add & request to play it live on the radio."
         )
@@ -3372,6 +3441,15 @@ def process_job(job: sqlite3.Row) -> None:
         detail = play_live_stream(tracks[0])
         update_job(job_id, state="completed", completed=1, total=1, detail=detail)
         return
+    # A single livestream that did not make it to the relay branch (not requested,
+    # live playback off, or a stale pre-1.8.2 payload) is reported and failed fast;
+    # it must never enter the download queue and sit there retrying forever.
+    if len(tracks) == 1 and tracks[0].get("is_live"):
+        raise LiveStreamError(
+            "This is a YouTube livestream, not a recording, so it cannot be downloaded. "
+            "It plays live only when live playback is enabled in Preferences and you "
+            "choose Add & request."
+        )
     completed, first_request_id, download_errors = run_downloads(tracks, job_id)
     errors.extend(download_errors)
     if completed == 0:
@@ -3409,6 +3487,10 @@ def fail_or_requeue(job: sqlite3.Row, exc: Exception) -> None:
     """Put a failed job back in the queue while it has retries left, or record the failure."""
     attempts = job_attempts(job)
     message = describe_download_error(str(exc))
+    if isinstance(exc, LiveStreamError):
+        # A livestream cannot be downloaded, so requeuing it just blocks the queue.
+        update_job(job["id"], state="failed", detail="Download failed", error=message[:8000])
+        return
     if attempts <= JOB_RETRY_LIMIT:
         update_job(
             job["id"], state="queued",
@@ -3567,6 +3649,8 @@ def settings_page():
             "azuracast_upload_dir": request.form.get("azuracast_upload_dir", "").strip() or config.DEFAULT_UPLOAD_DIRECTORY,
             "azuracast_live_enabled": bool(request.form.get("azuracast_live_enabled")),
             "azuracast_live_url": request.form.get("azuracast_live_url", "").strip(),
+            "azuracast_live_metadata_url": request.form.get("azuracast_live_metadata_url", "").strip(),
+            "azuracast_live_metadata_key": request.form.get("azuracast_live_metadata_key", "").strip(),
             "bind_host": request.form.get("bind_host", "").strip() or config.DEFAULT_BIND_HOST,
             "bind_port": request.form.get("bind_port", "").strip() or config.DEFAULT_BIND_PORT,
             "deezer_arl": request.form.get("deezer_arl", "").strip(),

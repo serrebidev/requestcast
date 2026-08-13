@@ -60,6 +60,10 @@ FIELDS: dict[str, Any] = {
     # The destination for a live relay: the full icecast:// URL of the station's
     # live/DJ harbor, for example icecast://automation:PASSWORD@127.0.0.1:8005/live.
     "azuracast_live_url": "",
+    # Liquidsoap's metadata/telnet API, used to push the livestream's now-playing
+    # title after the live-fallback switch. Leave empty to relay without titles.
+    "azuracast_live_metadata_url": "",
+    "azuracast_live_metadata_key": "",
     "password_salt": "",
     "password_hash": "",
     "admin_password_salt": "",
@@ -129,6 +133,8 @@ ENVIRONMENT_NAMES: dict[str, tuple[str, ...]] = {
     "azuracast_upload_dir": ("REQUESTCAST_UPLOAD_DIR",),
     "azuracast_live_enabled": ("REQUESTCAST_AZURACAST_LIVE_ENABLED",),
     "azuracast_live_url": ("REQUESTCAST_AZURACAST_LIVE_URL",),
+    "azuracast_live_metadata_url": ("REQUESTCAST_AZURACAST_LIVE_METADATA_URL",),
+    "azuracast_live_metadata_key": ("REQUESTCAST_AZURACAST_LIVE_METADATA_KEY",),
     "password_salt": ("REQUESTCAST_PASSWORD_SALT", "ADDTO_PASSWORD_SALT"),
     "password_hash": ("REQUESTCAST_PASSWORD_HASH", "ADDTO_PASSWORD_HASH"),
     "admin_password_salt": ("REQUESTCAST_ADMIN_PASSWORD_SALT",),
