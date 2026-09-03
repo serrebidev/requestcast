@@ -6,6 +6,8 @@ on your own machine or an [AzuraCast](https://www.azuracast.com/) station's requ
 It runs two ways from the same code: a **portable Windows program** you double-click, and a
 **server deployment** behind a reverse proxy.
 
+**Questions, bugs, or release news?** Join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects), the fastest place to get help.
+
 ## What it does
 
 - Search YouTube, Deezer, optionally every musicdl platform, and Soulseek peers from one box,
