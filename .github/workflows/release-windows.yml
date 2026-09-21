@@ -97,6 +97,7 @@ jobs:
             'tests/test_large_import.py',
             'tests/test_search_limits.py',
             'tests/test_download_retries.py',
+            'tests/test_orphaned_jobs.py',
             'tests/test_tool_updates.py'
           )
           foreach ($test in $suite) {

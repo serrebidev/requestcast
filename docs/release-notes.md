@@ -1,16 +1,20 @@
-RequestCast now recognises live events that it did not start — a scheduled show
-like A State of Trance, a remote DJ, or another tool feeding the live harbor —
-and yields to them.
+Two ways a download could quietly stop making progress are fixed: it can no longer
+pull the whole video behind a track, and it can no longer sit in "running" forever
+with nothing working on it.
 
-**Outside events are detected and shown.** The home page now reports the live
-event currently on air (from the station's nowplaying API) alongside RequestCast's
-own relay. RequestCast's own relay is told apart by matching its broadcast start
-time, so it never shows up twice.
+**Audio only, never video.** A YouTube download now asks for an audio stream and
+nothing else. Some player clients answer with muxed streams only, and the old
+`bestaudio/best` fallback then downloaded the entire video — a 56-minute talk came
+down as a 754 MB file carrying an h264 stream, which then went into the request
+library. Failing that client instead hands the same track to the next one in the
+rotation, which does offer audio-only formats, so the download is smaller and
+faster rather than merely successful.
 
-**Live events take priority.** When a live event is already on air, "Add &
-request" on a YouTube livestream now reports that the event has priority instead
-of connecting a second source over it. While a relayed stream is playing, the
-title/metadata loop stops the moment an outside event takes over, so RequestCast
-never overwrites the event's own title; and when a relay ends, the watchdog only
-marks the live over if no outside event has taken over the harbor — so an
-incoming show is not wrongly reported as ended.
+**Interrupted jobs are taken back.** A job left in "running" by a worker that is
+no longer processing it — a download thread that died, a worker killed mid-run, or
+an exception path that never reached the failure handler — was invisible for the
+life of the service: never downloaded, never requested, its status page spinning
+until someone restarted RequestCast. The worker loop now notices that nothing is
+holding such a job and queues it again, spending one of its retries; a job that
+cannot survive its own download runs out of retries and is recorded as failed, so
+it reads as broken instead of hanging.

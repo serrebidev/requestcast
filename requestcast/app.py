@@ -3515,7 +3515,12 @@ def download_one(track: dict[str, Any], attempt: int = 0) -> tuple[str, Path, di
                 "--retry-sleep", f"exp={max(1, DOWNLOAD_RETRY_DELAY // 4)}:{max(4, DOWNLOAD_RETRY_DELAY)}",
                 "--sleep-requests", str(max(1, DOWNLOAD_GAP_SECONDS)),
                 "--max-filesize", "500M", "--match-filter", "!is_live & duration < 7200",
-                "-f", "bestaudio/best", *js_runtime_arguments(),
+                # Audio only, with no "/best" fallback. Some player clients answer with
+                # muxed streams and nothing else, and a fallback then downloads the whole
+                # video: a 56-minute talk pulled 754 MB, carrying an h264 stream into a
+                # radio library. Failing instead hands the track to the next client in the
+                # rotation, which does offer audio-only formats.
+                "-f", "bestaudio", *js_runtime_arguments(),
             ]
             # A 403 or "unavailable" from one YouTube client is often fine from another,
             # so each retry asks as a different one.
@@ -3663,6 +3668,40 @@ def fail_or_requeue(job: sqlite3.Row, exc: Exception) -> None:
     update_job(job["id"], state="failed", detail="Download failed", error=message[:8000])
 
 
+def reclaim_orphaned_job() -> bool:
+    """Take back a job left in 'running' by a worker that is no longer processing it.
+
+    Only ``claim_job`` sets 'running', and ``worker_loop`` is its only caller, so a
+    running job seen from the idle branch of that loop has lost whoever was holding it:
+    a download thread that died, a worker killed mid-run, or an exception path that
+    never reached ``fail_or_requeue``. Nothing else recovers it, so the job would sit
+    there for the life of the service — never downloading, never requested, with the
+    status page spinning — until someone restarted it. A reclaim spends one of the
+    job's retries, so a job that cannot survive its own download ends up recorded as
+    failed instead of looping.
+    """
+    with db_connect() as con:
+        row = con.execute(
+            "SELECT * FROM jobs WHERE state='running' ORDER BY created_at LIMIT 1"
+        ).fetchone()
+        if not row:
+            return False
+        now = int(time.time())
+        if int(row["attempts"] or 0) > JOB_RETRY_LIMIT:
+            con.execute(
+                "UPDATE jobs SET state='failed', detail='Download failed', error=?, updated_at=?"
+                " WHERE id=?",
+                ("The download was interrupted and has run out of retries.", now, row["id"]),
+            )
+        else:
+            con.execute(
+                "UPDATE jobs SET state='queued', detail='Resuming an interrupted download',"
+                " updated_at=? WHERE id=?",
+                (now, row["id"]),
+            )
+    return True
+
+
 def worker_loop() -> None:
     while True:
         if not config.is_configured(SETTINGS):
@@ -3674,6 +3713,12 @@ def worker_loop() -> None:
             time.sleep(2)
             continue
         if not job:
+            # This worker is not processing anything, so a job still marked 'running'
+            # has nobody left to finish it.
+            try:
+                reclaim_orphaned_job()
+            except sqlite3.Error:
+                pass
             time.sleep(2)
             continue
         try:

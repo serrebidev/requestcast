@@ -39,6 +39,11 @@ It runs two ways from the same code: a **portable Windows program** you double-c
 - Artist-only lines take that artist's **entire catalogue** by default, or a cap you choose
 - **Preserves audio quality** — the source stream is remuxed, never re-encoded, and the tests
   verify the audio packets come out bit-identical
+- **Never downloads video.** A YouTube track is fetched as audio only, so a long talk or
+  podcast lands as a few megabytes of audio instead of the whole video file
+- **Downloads do not get stuck.** A job that loses its worker mid-run is queued again by
+  itself, and one that cannot survive its own download is reported as failed rather than
+  left spinning forever
 - Writes proper tags and cover art for MP3, MP4/M4A, FLAC, Ogg, and WAV/AIFF
 - Optionally uploads each finished file to AzuraCast and adds it to a request playlist
 - YouTube **livestreams play live** instead of downloading: "Add & request" on a live URL
