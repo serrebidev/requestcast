@@ -6,7 +6,7 @@ pycryptodome==3.23.0
 pypdf==6.19.0
 requests==2.34.2
 urllib3==2.8.0
-charset-normalizer==3.5.1
+charset-normalizer==3.5.2
 chardet==7.6.0
 waitress==3.0.2
 ytmusicapi==1.12.3
