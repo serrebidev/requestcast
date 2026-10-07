@@ -1,4 +1,4 @@
-conclusion=cancelled
-run_id=37622085165
-run_url=https://github.com/serrebidev/requestcast/actions/runs/37622085165
-source_sha=374b580e237f67e3d595806d881b431c9e442db6
+conclusion=success
+run_id=37622185294
+run_url=https://github.com/serrebidev/requestcast/actions/runs/37622185294
+source_sha=9474ba90e3654c9df2eac4f88f62ae3d0f13a110
