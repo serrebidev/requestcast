@@ -10,5 +10,5 @@ charset-normalizer==3.5.2
 chardet==7.6.0
 waitress==3.0.2
 ytmusicapi==1.12.3
-musicdl==2.14.2
+musicdl
 aioslsk==1.7.1
