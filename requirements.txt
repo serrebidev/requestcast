@@ -3,12 +3,12 @@ itsdangerous==2.2.0
 mutagen==1.48.1
 openpyxl==3.1.5
 pycryptodome==3.24.1
-pypdf==6.20.1
+pypdf==6.21.1
 requests==2.34.2
 urllib3==2.8.0
 charset-normalizer==3.5.2
 chardet==7.6.0
 waitress==3.0.2
 ytmusicapi==1.12.3
-musicdl==2.14.1
+musicdl==2.14.2
 aioslsk==1.7.1
