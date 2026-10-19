@@ -44,3 +44,14 @@ jobs:
             --title "Record Windows release status: ${{ github.event.workflow_run.conclusion }}" \
             --body "Automated status record for Windows release run ${{ github.event.workflow_run.id }} (${{ github.event.workflow_run.conclusion }}).")"
           gh pr merge "$pr_url" --auto --squash
+          # Auto-merge does not reliably trigger the repo's delete-branch-on-
+          # merge for bot PRs, so wait for the merge and delete the branch
+          # here. If it has not merged in ~5 minutes the record still lands
+          # via auto-merge; only the cleanup is skipped.
+          for i in $(seq 1 30); do
+            if [ "$(gh pr view "$pr_url" --json state --jq .state)" = "MERGED" ]; then
+              git push origin --delete "$branch" || true
+              break
+            fi
+            sleep 10
+          done

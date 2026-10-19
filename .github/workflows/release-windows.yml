@@ -77,6 +77,9 @@ jobs:
               if ($state -eq "MERGED") {
                 $mergeSha = gh pr view $prUrl --json mergeCommit --jq ".mergeCommit.oid"
                 if ($mergeSha) { $sourceSha = $mergeSha }
+                # Auto-merge does not reliably trigger delete-branch-on-merge
+                # for bot PRs; remove the spent branch here.
+                git push origin --delete $branch
                 break
               }
               Start-Sleep -Seconds 10
@@ -141,6 +144,17 @@ jobs:
             git push origin $failBranch
             $failPrUrl = gh pr create --base main --head $failBranch --title "Record Windows release test failure" --body "Automated failure record from Windows release run ${{ github.run_id }}; the run itself still fails with the test exit code."
             gh pr merge $failPrUrl --auto --squash
+            # Wait briefly for the merge and remove the spent branch (auto-
+            # merge does not reliably trigger delete-branch-on-merge for bot
+            # PRs). The record still lands via auto-merge if this times out.
+            for ($i = 0; $i -lt 12; $i++) {
+              $failState = gh pr view $failPrUrl --json state --jq ".state"
+              if ($failState -eq "MERGED") {
+                git push origin --delete $failBranch
+                break
+              }
+              Start-Sleep -Seconds 10
+            }
             exit $exitCode
           }
           Remove-Item $log
