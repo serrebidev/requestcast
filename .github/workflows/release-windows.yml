@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: requestcast-windows-release
@@ -49,17 +50,38 @@ jobs:
 
       - name: Integrate YouTube collection support
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python scripts/apply_youtube_collections_patch.py
+          $sourceSha = git rev-parse HEAD
           $changes = git status --porcelain -- requestcast/app.py
           if ($changes) {
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add requestcast/app.py
             git commit -m "Enable YouTube playlist and channel URLs"
-            git push origin HEAD:main
+            $sourceSha = git rev-parse HEAD
+            # Branch protection rejects direct bot pushes to main (GH006), so
+            # the commit lands via a short-lived branch and an auto-merging PR.
+            $branch = "bot/youtube-collections-${{ github.run_id }}"
+            git branch $branch
+            git push origin $branch
+            $prUrl = gh pr create --base main --head $branch --title "Enable YouTube playlist and channel URLs" --body "Automated commit from the Windows release build: applies scripts/apply_youtube_collections_patch.py so main matches the shipped source."
+            gh pr merge $prUrl --auto --squash
+            # Wait briefly for the auto-merge so the release tag can point at
+            # the commit that landed on main; the local commit has the
+            # identical tree, so it is a safe fallback.
+            for ($i = 0; $i -lt 12; $i++) {
+              $state = gh pr view $prUrl --json state --jq ".state"
+              if ($state -eq "MERGED") {
+                $mergeSha = gh pr view $prUrl --json mergeCommit --jq ".mergeCommit.oid"
+                if ($mergeSha) { $sourceSha = $mergeSha }
+                break
+              }
+              Start-Sleep -Seconds 10
+            }
           }
-          $sourceSha = git rev-parse HEAD
           "SOURCE_SHA=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Determine release metadata
@@ -81,6 +103,7 @@ jobs:
         shell: pwsh
         env:
           REQUESTCAST_DISABLE_WORKER: '1'
+          GH_TOKEN: ${{ github.token }}
         run: |
           $log = "release-windows-test-output.txt"
           python -m compileall -q requestcast tests *> $log
@@ -111,7 +134,13 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add $log
             git commit -m "Record Windows release test failure"
-            git push origin HEAD:main
+            # Branch protection rejects direct bot pushes to main (GH006), so
+            # the record lands via a short-lived branch and an auto-merging PR.
+            $failBranch = "bot/release-test-failure-${{ github.run_id }}"
+            git branch $failBranch
+            git push origin $failBranch
+            $failPrUrl = gh pr create --base main --head $failBranch --title "Record Windows release test failure" --body "Automated failure record from Windows release run ${{ github.run_id }}; the run itself still fails with the test exit code."
+            gh pr merge $failPrUrl --auto --squash
             exit $exitCode
           }
           Remove-Item $log
