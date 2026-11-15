@@ -62,31 +62,10 @@ jobs:
             git add requestcast/app.py
             git commit -m "Enable YouTube playlist and channel URLs"
             $sourceSha = git rev-parse HEAD
-            # Branch protection rejects direct bot pushes to main (GH006), so
-            # the commit lands via a short-lived branch and an auto-merging PR.
-            $branch = "bot/youtube-collections-${{ github.run_id }}"
-            git branch $branch
-            git push origin $branch
-            $prUrl = gh pr create --base main --head $branch --title "Enable YouTube playlist and channel URLs" --body "Automated commit from the Windows release build: applies scripts/apply_youtube_collections_patch.py so main matches the shipped source."
-            # A PR with nothing to wait for can be "clean" instantly, and
-            # GitHub then refuses to enable auto-merge; merge it directly.
-            gh pr merge $prUrl --auto --squash
-            if ($LASTEXITCODE -ne 0) { gh pr merge $prUrl --squash }
-            # Wait briefly for the auto-merge so the release tag can point at
-            # the commit that landed on main; the local commit has the
-            # identical tree, so it is a safe fallback.
-            for ($i = 0; $i -lt 12; $i++) {
-              $state = gh pr view $prUrl --json state --jq ".state"
-              if ($state -eq "MERGED") {
-                $mergeSha = gh pr view $prUrl --json mergeCommit --jq ".mergeCommit.oid"
-                if ($mergeSha) { $sourceSha = $mergeSha }
-                # Auto-merge does not reliably trigger delete-branch-on-merge
-                # for bot PRs; remove the spent branch here.
-                git push origin --delete $branch
-                break
-              }
-              Start-Sleep -Seconds 10
-            }
+            # Forgejo has no branch protection on main, so the commit pushes
+            # directly (the old GitHub PR dance existed only for GH006).
+            git push origin HEAD:main
+            if ($LASTEXITCODE -ne 0) { throw "Pushing the YouTube collections commit to main failed." }
           }
           "SOURCE_SHA=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Append
 
@@ -140,25 +119,9 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add $log
             git commit -m "Record Windows release test failure"
-            # Branch protection rejects direct bot pushes to main (GH006), so
-            # the record lands via a short-lived branch and an auto-merging PR.
-            $failBranch = "bot/release-test-failure-${{ github.run_id }}"
-            git branch $failBranch
-            git push origin $failBranch
-            $failPrUrl = gh pr create --base main --head $failBranch --title "Record Windows release test failure" --body "Automated failure record from Windows release run ${{ github.run_id }}; the run itself still fails with the test exit code."
-            gh pr merge $failPrUrl --auto --squash
-            if ($LASTEXITCODE -ne 0) { gh pr merge $failPrUrl --squash }
-            # Wait briefly for the merge and remove the spent branch (auto-
-            # merge does not reliably trigger delete-branch-on-merge for bot
-            # PRs). The record still lands via auto-merge if this times out.
-            for ($i = 0; $i -lt 12; $i++) {
-              $failState = gh pr view $failPrUrl --json state --jq ".state"
-              if ($failState -eq "MERGED") {
-                git push origin --delete $failBranch
-                break
-              }
-              Start-Sleep -Seconds 10
-            }
+            # Forgejo has no branch protection on main: push the record
+            # directly (the old GitHub PR dance existed only for GH006).
+            git push origin HEAD:main
             exit $exitCode
           }
           Remove-Item $log
@@ -171,23 +134,53 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "dist\RequestCast\*" -DestinationPath "$env:RELEASE_ZIP" -Force
 
-      - name: Create or update GitHub release
+      - name: Create or update Forgejo release
         shell: pwsh
         env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
           GH_TOKEN: ${{ github.token }}
+          API_URL: ${{ github.server_url }}/api/v1
+          REPO: ${{ github.repository }}
         run: |
-          $notes = "docs/release-notes.md"
-          gh release view "$env:RELEASE_TAG" *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release edit "$env:RELEASE_TAG" --title "$env:RELEASE_TITLE" --notes-file "$notes"
-            gh release upload "$env:RELEASE_TAG" "$env:RELEASE_ZIP" --clobber
-          }
-          else {
-            gh release create "$env:RELEASE_TAG" "$env:RELEASE_ZIP" --target "$env:SOURCE_SHA" --title "$env:RELEASE_TITLE" --notes-file "$notes"
-          }
+          $script = @'
+          import os, requests
+          api = os.environ["API_URL"].rstrip("/")
+          repo = os.environ["REPO"]
+          tag = os.environ["RELEASE_TAG"]
+          title = os.environ["RELEASE_TITLE"]
+          zip_path = os.environ["RELEASE_ZIP"]
+          sha = os.environ["SOURCE_SHA"]
+          token = os.environ.get("FORGEJO_TOKEN") or os.environ.get("GH_TOKEN")
+          headers = {"Authorization": f"token {token}"}
+          notes = open("docs/release-notes.md", encoding="utf-8").read()
+          r = requests.get(f"{api}/repos/{repo}/releases/tags/{tag}", headers=headers)
+          if r.status_code == 200:
+              rel = r.json()
+              rid = rel["id"]
+              requests.patch(f"{api}/repos/{repo}/releases/{rid}", headers=headers,
+                             json={"name": title, "body": notes}).raise_for_status()
+              for asset in rel.get("assets", []):
+                  if asset["name"] == os.path.basename(zip_path):
+                      requests.delete(f"{api}/repos/{repo}/releases/{rid}/assets/{asset['id']}",
+                                      headers=headers).raise_for_status()
+          else:
+              r = requests.post(f"{api}/repos/{repo}/releases", headers=headers,
+                                json={"tag_name": tag, "name": title, "body": notes,
+                                      "target_commitish": sha})
+              r.raise_for_status()
+              rid = r.json()["id"]
+          with open(zip_path, "rb") as fh:
+              up = requests.post(f"{api}/repos/{repo}/releases/{rid}/assets", headers=headers,
+                                 params={"name": os.path.basename(zip_path)},
+                                 files={"attachment": fh})
+              up.raise_for_status()
+          print(f"Published {tag} to Forgejo (release id {rid}) with {zip_path}")
+          '@
+          Set-Content -Path publish_release.py -Value $script -Encoding utf8
+          python publish_release.py
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v5
+        uses: code.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: RequestCast-${{ env.RELEASE_TAG }}-windows-x64
           path: ${{ env.RELEASE_ZIP }}
