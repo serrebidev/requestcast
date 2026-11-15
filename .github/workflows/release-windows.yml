@@ -178,9 +178,3 @@ jobs:
           '@
           Set-Content -Path publish_release.py -Value $script -Encoding utf8
           python publish_release.py
-
-      - name: Upload workflow artifact
-        uses: code.forgejo.org/forgejo/upload-artifact@v4
-        with:
-          name: RequestCast-${{ env.RELEASE_TAG }}-windows-x64
-          path: ${{ env.RELEASE_ZIP }}
