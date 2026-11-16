@@ -3,10 +3,14 @@
 Search for music, download it, tag it properly, and file it into a library — either a folder
 on your own machine or an [AzuraCast](https://www.azuracast.com/) station's request playlist.
 
+[![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
+
 It runs two ways from the same code: a **portable Windows program** you double-click, and a
 **server deployment** behind a reverse proxy.
 
 **Questions, bugs, or release news?** Join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects), the fastest place to get help.
+
+More serrebi projects: [projects.serrebiradio.com](https://projects.serrebiradio.com)
 
 ## What it does
 
@@ -218,3 +222,7 @@ MIT — see [LICENSE](LICENSE).
 
 yt-dlp, ffmpeg, and Deno are separate programs under their own licences; RequestCast runs
 them, and does not include them.
+
+## Credits
+
+See [CREDITS.md](CREDITS.md) for where the ideas behind this project came from, and the third-party projects it builds on.
