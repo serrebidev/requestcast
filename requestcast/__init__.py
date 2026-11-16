@@ -1,4 +1,4 @@
 """RequestCast: search, download, tag, and file music into a request library."""
 
-__version__ = "1.8.15"
+__version__ = "1.8.16"
 # Updating this file triggers a verified Windows release build.
