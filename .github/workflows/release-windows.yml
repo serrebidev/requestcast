@@ -9,6 +9,11 @@ on:
         description: Optional release tag override
         required: false
         default: ''
+      dry_run:
+        description: Build and sign only; publish nothing
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -61,8 +66,10 @@ jobs:
             $sourceSha = git rev-parse HEAD
             # Forgejo has no branch protection on main, so the commit pushes
             # directly (the old GitHub PR dance existed only for GH006).
-            git push origin HEAD:main
-            if ($LASTEXITCODE -ne 0) { throw "Pushing the YouTube collections commit to main failed." }
+            if ("${{ inputs.dry_run }}" -ne "true") {
+              git push origin HEAD:main
+              if ($LASTEXITCODE -ne 0) { throw "Pushing the YouTube collections commit to main failed." }
+            }
           }
           "SOURCE_SHA=$sourceSha" | Out-File -FilePath $env:GITHUB_ENV -Append
 
@@ -118,7 +125,7 @@ jobs:
             git commit -m "Record Windows release test failure"
             # Forgejo has no branch protection on main: push the record
             # directly (the old GitHub PR dance existed only for GH006).
-            git push origin HEAD:main
+            if ("${{ inputs.dry_run }}" -ne "true") { git push origin HEAD:main }
             exit $exitCode
           }
           Remove-Item $log
@@ -132,12 +139,13 @@ jobs:
         run: Compress-Archive -Path "dist\RequestCast\*" -DestinationPath "$env:RELEASE_ZIP" -Force
 
       - name: Create or update Forgejo release
+        if: ${{ !inputs.dry_run }}
         shell: pwsh
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
           GH_TOKEN: ${{ github.token }}
-          API_URL: ${{ github.server_url }}/api/v1
-          REPO: ${{ github.repository }}
+          API_URL: https://git.serrebiradio.com/api/v1
+          REPO: serrebi/requestcast
         run: |
           $script = @'
           import os, requests
