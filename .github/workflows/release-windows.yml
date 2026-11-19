@@ -1,5 +1,7 @@
 name: Build Windows release
 
+# Manual only: the Forgejo-to-GitHub sync disables GitHub workflows with
+# automatic triggers.
 on:
   workflow_dispatch:
     inputs:
@@ -7,11 +9,6 @@ on:
         description: Optional release tag override
         required: false
         default: ''
-  push:
-    branches:
-      - main
-    paths:
-      - requestcast/__init__.py
 
 permissions:
   contents: write
